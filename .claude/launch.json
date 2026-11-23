@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "report",
+      "runtimeExecutable": "C:/Program Files/R/R-4.4.2/bin/Rscript.exe",
+      "runtimeArgs": ["-e", "httpuv::runStaticServer('03_output', port = 8765, browse = FALSE)"],
+      "port": 8765
+    }
+  ]
+}

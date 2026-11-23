@@ -1,0 +1,882 @@
+---
+title: "Text Reminders and FIT Kit Returns"
+subtitle: "A Three-Window Bayesian Hierarchical Model: Design, Changes and Results"
+author: "[Author names]"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+params:
+  model_dir: "03_output/models/stage_model"
+  prior_dir: "03_output/models/stage_model_prior"
+  data_file: "01_data/clean/kits.rds"
+  stan_file: "02_scripts/stan/kit_returns_stage.stan"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include = FALSE}
+root <- rprojroot::find_rstudio_root_file()
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5, dpi = 150,
+                      fig.path = paste0(file.path(root, "03_output", "figures", "model_report"), "/"))
+knitr::opts_knit$set(root.dir = root)
+
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(forcats); library(purrr)
+  library(ggplot2); library(ggdist); library(patchwork); library(scales); library(knitr)
+  library(posterior); library(cmdstanr); library(bayesplot)
+})
+options(cmdstanr_no_ver_check = TRUE)
+
+path <- function(...) file.path(root, ...)
+
+# ---- Palette & theme (shared with the EDA report) ---------------------------
+col_main  <- "#2a78d6"   # posterior / reminders on
+col_alt   <- "#eb6834"   # observed data in model checks
+col_off   <- "#8a8984"   # reminders off / priors
+col_ink   <- "#0b0b0b"
+col_ink2  <- "#52514e"
+col_grid  <- "#e6e5e1"
+
+theme_crc <- function() {
+  theme_minimal(base_size = 11) +
+    theme(text             = element_text(colour = col_ink),
+          axis.text        = element_text(colour = col_ink2),
+          plot.title       = element_text(face = "bold", size = 12),
+          plot.subtitle    = element_text(colour = col_ink2, size = 10),
+          plot.caption     = element_text(colour = col_ink2, size = 8, hjust = 0),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(colour = col_grid, linewidth = 0.3),
+          strip.text       = element_text(face = "bold", hjust = 0),
+          strip.text.y     = element_text(angle = 0),
+          plot.title.position   = "plot",
+          plot.caption.position = "plot",
+          legend.position  = "top", legend.justification = "left",
+          legend.title     = element_blank())
+}
+theme_set(theme_crc())
+
+# Faceted interval plots: labels such as "Other"/"Unknown" repeat across panels,
+# so rows are keyed "panel|label" (keeps the intended order) and the key prefix
+# is stripped for display.
+row_key   <- function(panel, label) factor(paste(panel, label, sep = "|"),
+                                           levels = rev(unique(paste(panel, label, sep = "|"))))
+strip_key <- function(x) sub("^.*\\|", "", x)
+facet_strip_left <- theme(strip.placement = "outside",
+                          strip.text.y.left = element_text(angle = 0, face = "bold", hjust = 1),
+                          panel.spacing.y = unit(8, "pt"))
+
+# ---- Load model output -------------------------------------------------------
+kits    <- read_rds(path(params$data_file))
+labels  <- read_rds(path(params$model_dir, "design_labels.rds"))
+ppc_obs <- read_csv(path(params$model_dir, "ppc_summary.csv"), show_col_types = FALSE)
+pat_re  <- read_csv(path(params$model_dir, "patient_effects.csv"), show_col_types = FALSE)
+timing  <- read_rds(path(params$model_dir, "timing.rds"))
+
+csvs <- list.files(path(params$model_dir), pattern = "^stage_model-\\d+\\.csv$", full.names = TRUE)
+rep_vars <- c("rep_ret_pre", "rep_ret_post", "rep_w1_pre", "rep_w1_post", "rep_w2_pre", "rep_w2_post",
+              "rep_w3_pre", "rep_w3_post", "rep_all_multi", "rep_none_multi")
+model_pars <- c("alpha", "beta", "beta_post", "beta_covid_late", "beta_remind", "beta_carry", "tau",
+                "gamma_age", "gamma_fam", "gamma_con", "gamma_carry_con", "sigma_u", "rho_u",
+                "d_sex", "d_race", "d_lang", "d_emp", "d_rel")
+vars <- c(model_pars, "or_remind", "or_carry", "p_on_post", "p_off_post", "rd_post", "rd_grp", rep_vars)
+raw   <- read_cmdstan_csv(csvs, variables = vars, sampler_diagnostics = c("divergent__", "treedepth__"))
+draws <- as_draws_df(raw$post_warmup_draws)
+sdiag <- as_draws_df(raw$post_warmup_sampler_diagnostics)
+n_draws  <- nrow(draws)
+n_chains <- nchains(raw$post_warmup_draws)
+
+prior_csvs  <- list.files(path(params$prior_dir), pattern = "^stage_model_prior-\\d+\\.csv$", full.names = TRUE)
+prior_draws <- as_draws_df(read_cmdstan_csv(prior_csvs, variables = c("rd_post", "or_remind", rep_vars),
+                                            sampler_diagnostics = "")$post_warmup_draws)
+
+# ---- Helpers -----------------------------------------------------------------
+# "median (95% CrI lo to hi)" for a vector of draws
+ci <- function(x, scale = 1, digits = 1, suffix = "") {
+  q <- round(quantile(x * scale, c(0.5, 0.025, 0.975)), digits) + 0   # + 0 avoids "-0.0"
+  sprintf("%s%s (95%% CrI %s to %s)", formatC(q[1], format = "f", digits = digits), suffix,
+          formatC(q[2], format = "f", digits = digits), formatC(q[3], format = "f", digits = digits))
+}
+med  <- function(x, scale = 1, digits = 1) formatC(round(median(x * scale), digits) + 0, format = "f", digits = digits)
+# Posterior probability; with a few thousand draws, 0% / 100% would overstate certainty
+prob <- function(cond) {
+  p <- mean(cond)
+  if (p >= 0.995) return(">99%")
+  if (p <= 0.005) return("<1%")
+  sprintf("%.0f%%", 100 * p)
+}
+pp      <- function(x) 100 * x   # proportion -> percentage points
+obs_pct <- function(v) sprintf("%.1f%%", 100 * ppc_obs$observed[ppc_obs$variable == v])
+pts     <- function(x) paste0(ifelse(x > 0, "+", ""), x, " pts")
+big     <- function(x) format(x, big.mark = ",")
+
+# Long draws for a set of columns, with display labels
+long_draws <- function(cols, labels = cols, dr = draws) {
+  dr %>% as_tibble() %>% select(all_of(cols)) %>%
+    pivot_longer(everything(), names_to = "variable") %>%
+    mutate(label = labels[match(variable, cols)])
+}
+```
+
+```{r derived}
+# ---- Labels for the shared covariates (columns of X) -------------------------
+x_lab <- tribble(
+  ~col,                            ~label,                                 ~domain,
+  "age_c10",                       "Age (per 10 years)",                   "Patient",
+  "family_size_c",                 "Household size (per person)",          "Patient",
+  "first_kit",                     "First kit (vs. repeat kit)",           "Patient",
+  "sexMale",                       "Male (vs. female)",                    "Patient",
+  "relationshipPartnered",         "Partnered (vs. not partnered)",        "Patient",
+  "relationshipUnknown",           "Relationship status unknown",          "Patient",
+  "q4",                            "Dispensed Oct–Dec",                    "Timing",
+  "covid",                         "COVID period (Mar 2020–Jun 2021)",     "Timing",
+  "time_yrs",                      "Calendar trend (per year)",            "Timing",
+  "employmentPart-time",           "Part-time (vs. full-time)",            "Employment",
+  "employmentSeasonal/Temporary",  "Seasonal/temporary",                   "Employment",
+  "employmentOther",               "Other",                                "Employment",
+  "employmentUnemployed",          "Unemployed",                           "Employment",
+  "employmentUnknown",             "Unknown",                              "Employment",
+  "race_ethWhite",                 "White (vs. Hispanic/Latino)",          "Race/ethnicity",
+  "race_ethBlack",                 "Black",                                "Race/ethnicity",
+  "race_ethAsian",                 "Asian",                                "Race/ethnicity",
+  "race_ethOther",                 "Other",                                "Race/ethnicity",
+  "race_ethUnknown",               "Unknown",                              "Race/ethnicity",
+  "languagePolish",                "Polish (vs. Spanish)",                 "Language",
+  "languageEnglish",               "English",                              "Language",
+  "languageOther",                 "Other",                                "Language",
+  "languageUnknown",               "Unknown",                              "Language",
+  "text_consentNo",                "Declined texts (vs. consented)",       "Text consent",
+  "text_consentUnknown",           "Consent unknown",                      "Text consent"
+) %>%
+  mutate(variable = paste0("beta[", match(col, labels$X_cols), "]"))
+stopifnot(!any(is.na(match(x_lab$col, labels$X_cols))))
+xb <- function(col) draws[[x_lab$variable[x_lab$col == col]]]
+
+# Reminder & period terms on the same odds-ratio scale
+extra_lab <- tribble(
+  ~variable,          ~label,                                           ~domain,
+  "beta_remind",      "Text reminders, days 15–90 (consenters)",        "Reminders",
+  "beta_carry",       "After day 90 (texts stopped), post period",      "Reminders",
+  "beta_post",        "Other changes from 2022 (all windows)",          "Timing",
+  "beta_covid_late",  "COVID period: extra effect after day 14",        "Timing"
+)
+or_lab <- bind_rows(extra_lab, x_lab %>% select(variable, label, domain)) %>%
+  mutate(domain = factor(domain, levels = c("Reminders", "Timing", "Patient", "Employment",
+                                            "Race/ethnicity", "Language", "Text consent")))
+
+# Subgroup effects (percentage points)
+grp <- labels$grp_levels %>%
+  mutate(variable = paste0("rd_grp[", id, "]"),
+         factor_label = recode(factor, sex = "Sex", race_eth = "Race/ethnicity", language = "Language",
+                               employment = "Employment", relationship = "Relationship",
+                               text_consent = "Text consent"))
+
+# Key derived quantities
+rd      <- draws$rd_post
+rd_g    <- function(f, l) draws[[grp$variable[grp$factor == f & grp$level == l]]]
+sex_gap <- rd_g("sex", "Female") - rd_g("sex", "Male")
+mor     <- function(s) exp(sqrt(2) * s * qnorm(0.75))
+mor1    <- mor(draws$`sigma_u[1]`)
+mor2    <- mor(draws$`sigma_u[2]`)
+
+# Data counts by window outcome
+d <- kits %>%
+  mutate(outcome = case_when(returned == 0 ~ "never",
+                             is.na(days_to_return) ~ "unknown",
+                             days_to_return <= 14 ~ "w1",
+                             days_to_return <= 90 ~ "w2",
+                             TRUE ~ "w3"))
+cnt <- function(o, p = NULL) {
+  x <- d %>% filter(outcome %in% o)
+  if (!is.null(p)) x <- x %>% filter(period == p)
+  nrow(x)
+}
+n_multi_pct <- mean(table(kits$patient_id)[as.character(kits$patient_id)] > 1)
+pre_ids     <- unique(kits$patient_id[kits$post == 0])
+post_ids    <- unique(kits$patient_id[kits$post == 1])
+n_pre_only  <- length(setdiff(pre_ids, post_ids))
+```
+
+```{=html}
+<!-- Slim tab on the left edge to hide/show the floating table of contents.
+     When hidden, the main column widens and gets left padding so the tab never covers text. -->
+<style>
+  #toc-toggle {
+    position: fixed; left: 0; top: 50%; transform: translateY(-50%); z-index: 1000;
+    width: 18px; height: 44px; padding: 0;
+    border: 1px solid #c3c2bd; border-left: none; border-radius: 0 6px 6px 0;
+    background: #dcdbd6; color: #52514e; font-size: 16px; line-height: 42px; text-align: center;
+    cursor: pointer; opacity: 0.9;
+  }
+  #toc-toggle:hover, #toc-toggle:focus-visible { opacity: 1; color: #2c2c2a; background: #cfcec8; }
+  .toc-col-hidden { display: none !important; }
+  .toc-content.toc-full { width: 100% !important; padding-left: 40px; }
+
+  /* TOC entries: number and heading side by side, so a heading that wraps to a
+     second line stays aligned with its first word. Indentation moves from
+     text-indent (first line only) to padding (every line). */
+  #TOC .tocify-item { display: flex; align-items: baseline; text-indent: 0; }
+  #TOC .tocify-item .header-section-number { flex: 0 0 auto; margin-right: 0.35em; }
+  #TOC .tocify-header > .tocify-item { padding-left: 25px; }
+  #TOC .tocify-subheader > .tocify-item { padding-left: 35px; }
+  #TOC .tocify-subheader .tocify-subheader > .tocify-item { padding-left: 45px; }
+</style>
+<button id="toc-toggle" type="button" aria-controls="TOC" aria-expanded="true"
+        aria-label="Hide table of contents" title="Hide table of contents">&lsaquo;</button>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    var btn = document.getElementById("toc-toggle");
+    var toc = document.getElementById("TOC");
+    var content = document.querySelector(".toc-content");
+    if (!toc || !btn) { if (btn) btn.style.display = "none"; return; }
+    var col = toc.parentElement;   // the column that holds the floating TOC
+
+    function setHidden(hidden) {
+      col.classList.toggle("toc-col-hidden", hidden);
+      if (content) content.classList.toggle("toc-full", hidden);
+      var label = hidden ? "Show table of contents" : "Hide table of contents";
+      btn.innerHTML = hidden ? "&rsaquo;" : "&lsaquo;";
+      btn.setAttribute("aria-label", label);
+      btn.setAttribute("title", label);
+      btn.setAttribute("aria-expanded", String(!hidden));
+      try { localStorage.setItem("tocHidden", hidden ? "1" : "0"); } catch (e) {}
+    }
+
+    var saved = null;
+    try { saved = localStorage.getItem("tocHidden"); } catch (e) {}
+    setHidden(saved === "1");
+    btn.addEventListener("click", function () {
+      setHidden(!col.classList.contains("toc-col-hidden"));
+    });
+  });
+</script>
+```
+
+<div style="background:#eef5fd; border-left:4px solid #2a78d6; padding:12px 16px; margin:16px 0;">
+**Key Findings**
+
+* **Reminders increased returns.** Among kits dispensed in 2022–2023, the model estimates a return rate of **`r med(draws$p_on_post, 100)`%** with the text-reminder program, versus **`r med(draws$p_off_post, 100)`%** had the same kits received no reminders. That is an increase of **`r ci(rd, 100, suffix = " points")`**. The posterior probability that reminders helped at all is `r prob(rd > 0)`; the probability that the gain exceeds 5 points is `r prob(rd > 0.05)`.
+* **The gain appears only after reminders started.** The share of kits returned in the first 14 days, before any reminder, was `r obs_pct("rep_w1_pre")` before 2022 and `r obs_pct("rep_w1_post")` after. Among kits still out at day 14, the share returned during days 15–90 (the reminder period) rose from `r obs_pct("rep_w2_pre")` to `r obs_pct("rep_w2_post")`. Among kits still out at day 90, very late returns also rose, from `r obs_pct("rep_w3_pre")` to `r obs_pct("rep_w3_post")`.
+* **Placebo check.** Patients who declined texts, and so should not have been reminded, had an estimated gain of `r ci(rd_g("text_consent", "No"), 100, suffix = " points")`, versus `r ci(rd_g("text_consent", "Yes"), 100, suffix = " points")` for patients who consented. The probability that consenters gained more is `r prob(rd_g("text_consent", "Yes") > rd_g("text_consent", "No"))`.
+* **Subgroups.** The gain was `r med(rd_g("sex", "Female"), 100)` points for women and `r med(rd_g("sex", "Male"), 100)` for men (probability women gained more: `r prob(sex_gap > 0)`). The reminder effect changed by `r ci(draws$gamma_age, digits = 2)` log-odds per decade of age (probability it grows with age: `r prob(draws$gamma_age > 0)`). Other subgroup differences were small and uncertain.
+</div>
+
+# Why a New Model
+
+The original analysis (OMED 2025 poster) used a Bayesian hierarchical binomial model. Peer review raised concerns that this model did not resolve:
+
+1. **Repeated kits from the same patient.** `r sprintf("%.0f%%", 100 * n_multi_pct)` of kits come from patients who received more than one kit. These kits are not independent: patients tend to return all of their kits or none. The original model had random effects for demographic groups, but **no patient-level effect**, so it did not account for this.
+2. **Differences between the pre and post cohorts** in age, prior screening and language.
+3. **Inconsistent numbers** between the poster and the manuscript.
+4. **Exposure:** not every post-period kit received a reminder. Texts were sent only to kits not yet returned, every two weeks from day 14 to day 90.
+5. **Subgroup conclusions** (age, sex, language) made without analyses that directly test them.
+
+The new model addresses each of these. The changes are listed in [Changes from the Original Model](#changes-from-the-original-model).
+
+# Data
+
+```{r data-summary}
+kpp <- kits %>% count(patient_id) %>%
+  mutate(k = ifelse(n >= 6, "6+", as.character(n))) %>%
+  count(k, name = "patients") %>%
+  mutate(`% of patients` = sprintf("%.1f%%", 100 * patients / sum(patients)))
+```
+
+The analysis uses **`r big(nrow(kits))` FIT kits** dispensed to **`r big(n_distinct(kits$patient_id))` patients** between `r format(min(kits$dispense_date), "%B %Y")` and `r format(max(kits$dispense_date), "%B %Y")`: `r big(sum(kits$post == 0))` before reminders began (2019–2021) and `r big(sum(kits$post == 1))` after (2022–2023). Data cleaning is documented separately (audit log and EDA report).
+
+**Outcome.** A kit counts as returned if it was returned at any point before data extraction. The latest return in the file is `r format(max(kits$return_date, na.rm = TRUE), "%B %d, %Y")`, so every kit had at least five months of follow-up.
+
+**Kits per patient** (requested by the reviewer):
+
+```{r kpp-table}
+kable(kpp, col.names = c("Kits received", "Patients", "% of patients"), align = "lrr")
+```
+
+# The Model
+
+## Three-Window Design
+
+In the post period, a text reminder was sent every two weeks from day 14 to day 90 after a kit was dispensed. Texts stopped as soon as the kit was returned, and stopped for good at day 90. A reminder can therefore only have influenced a kit that was still out at day 14, and mainly during days 15–90. The model follows each kit through three windows:
+
+* **Window 1 (days 0–14):** was the kit returned by day 14? No kit, before or after 2022, had received a reminder yet. Any change here after 2022 reflects *other* changes over time.
+* **Window 2 (days 15–90):** for kits still out at day 14, was the kit returned by day 90? **This is where reminders operate** in the post period.
+* **Window 3 (after day 90):** for kits still out at day 90, was the kit ever returned? Reminders had stopped. A separate term captures any post-period difference here: late responses to the final texts, or a different mix of kits still outstanding.
+
+```{r flow, fig.width = 10, fig.height = 4.4}
+pp_lab <- function(o) sprintf("Pre %s · Post %s", big(cnt(o, "Pre")), big(cnt(o, "Post")))
+nodes <- tibble(
+  x = c(0, 2.9, 2.9, 5.9, 5.9, 8.9, 8.9),
+  y = c(1.6, 2.9, 0.6, 1.7, -0.5, 0.5, -1.6),
+  label = c(sprintf("Kit dispensed\n%s kits", big(nrow(d))),
+            paste0("Returned by day 14\n", pp_lab("w1")),
+            paste0("Still out at day 14\n", pp_lab(c("w2", "w3", "never"))),
+            paste0("Returned days 15–90\n", pp_lab("w2")),
+            paste0("Still out at day 90\n", pp_lab(c("w3", "never"))),
+            paste0("Returned after day 90\n", pp_lab("w3")),
+            paste0("Never returned\n", pp_lab("never"))),
+  fill = c("white", "#eef5fd", "white", "#eef5fd", "white", "#eef5fd", "white"))
+arrows <- tibble(x    = c(0.95, 0.95, 3.85, 3.85, 6.85, 6.85),
+                 y    = c(1.8, 1.4, 0.8, 0.4, -0.3, -0.7),
+                 xend = c(1.9, 1.9, 4.9, 4.9, 7.9, 7.9),
+                 yend = c(2.75, 0.75, 1.55, -0.35, 0.35, -1.45))
+ggplot() +
+  annotate("rect", xmin = 3.95, xmax = 6.85, ymin = -1.25, ymax = 2.6, fill = "#fdf0ea", colour = NA) +
+  annotate("text", x = 5.4, y = 2.45, label = "Post period: text every 2 weeks, days 14–90",
+           size = 2.9, colour = col_alt, fontface = "bold") +
+  geom_segment(data = arrows, aes(x, y, xend = xend, yend = yend),
+               arrow = arrow(length = unit(2, "mm"), type = "closed"), colour = col_ink2, linewidth = 0.4) +
+  geom_label(data = nodes, aes(x, y, label = label, fill = fill), size = 2.8, label.size = 0.3,
+             label.padding = unit(4, "pt"), colour = col_ink, lineheight = 1.05) +
+  # window labels sit between each pair of outgoing arrows
+  annotate("text", x = 1.45, y = 1.6, label = "Window 1\n(days 0–14)", size = 2.7, colour = col_main, fontface = "bold") +
+  annotate("text", x = 4.4, y = 0.6, label = "Window 2\n(days 15–90)", size = 2.7, colour = col_main, fontface = "bold") +
+  annotate("text", x = 7.4, y = -0.5, label = "Window 3\n(day 91+)", size = 2.7, colour = col_main, fontface = "bold") +
+  scale_fill_identity() +
+  coord_cartesian(xlim = c(-0.9, 9.9), ylim = c(-2.1, 3.3)) +
+  theme_void() +
+  theme(plot.caption = element_text(colour = col_ink2, size = 8, hjust = 0)) +
+  labs(caption = sprintf("%d returned kits have no recorded return date. The model uses them without assigning a window.", cnt("unknown")))
+```
+
+Reminders work only in window 2. Most non-reminder changes (staffing, kit type, patient mix) would affect every window. Comparing the post-2022 change in window 2 with the change in window 1 therefore **separates the reminder effect from everything else that changed in 2022**, like a control group built into the timeline.
+
+**Key assumption.** Without reminders, changes after 2022 would have shifted returns in each window by the same amount on the odds scale. The pre-period placebo test (see [Limitations and Next Steps](#limitations-and-next-steps)) is designed to check this.
+
+## Model Components
+
+| Component | What it does | Why |
+|---|---|---|
+| **Three windows per kit** | Separate return probabilities for days 0–14, days 15–90 and after day 90 | Targets the reminder effect where reminders could act (reviewer point 4) |
+| **Patient random effects** | Each patient has their own tendency to return promptly (window 1) and later (windows 2–3); the two are allowed to correlate | Accounts for repeated kits from the same patient (reviewer point 1) |
+| **Time adjustment** | Post-2022 indicator, linear calendar trend, COVID period, Oct–Dec season | Keeps secular trends, COVID recovery and seasonality from being credited to reminders |
+| **Patient characteristics** | Age at each kit, sex, household size, relationship, employment, race/ethnicity, language, text consent, first vs. repeat kit | Adjusts for differences between the pre and post cohorts (reviewer point 2) |
+| **Subgroup reminder effects** | The reminder effect may differ by sex, race/ethnicity, language, employment, relationship, age and household size | Directly tests whether reminders worked better for some groups (reviewer point 5) |
+| **Partial pooling** | Subgroup differences share one learned "shrinkage" scale; small groups are pulled toward the overall effect | Prevents small groups from producing extreme, unreliable estimates |
+| **Text-consent check** | Patients who declined texts get their own, unpooled terms for days 15–90 and after day 90 | They should show no effect; a built-in placebo |
+| **After-reminder window** | A separate post-period term for returns after day 90 | Captures late responses to the final texts without counting them as active reminder time |
+| **Effects in percentage points** | Each post-period kit's return probability is predicted with the reminder program on and off, then averaged | Reports results on the scale clinicians use, not only as odds ratios |
+
+## Mathematical Specification
+
+For kit $i$ from patient $j$, let $p_{1i}$, $p_{2i}$ and $p_{3i}$ be the probabilities of return in windows 1, 2 and 3, each given the kit was still out at the start of that window. The probability that the kit is ever returned is
+
+$$P(\text{returned}_i) = p_{1i} + (1 - p_{1i})\,p_{2i} + (1 - p_{1i})(1 - p_{2i})\,p_{3i}.$$
+
+$$
+\begin{aligned}
+\text{logit}(p_{1i}) &= \alpha_1 + \mathbf{x}_i^\top\boldsymbol\beta + \beta_{\text{post}}\,\text{post}_i + u_{j1}\\
+\text{logit}(p_{2i}) &= \alpha_2 + \mathbf{x}_i^\top\boldsymbol\beta + \beta_{\text{post}}\,\text{post}_i + \beta_{\text{covid,late}}\,\text{covid}_i + \text{post}_i \cdot R_i + u_{j2}\\
+\text{logit}(p_{3i}) &= \alpha_3 + \mathbf{x}_i^\top\boldsymbol\beta + \beta_{\text{post}}\,\text{post}_i + \beta_{\text{covid,late}}\,\text{covid}_i + \text{post}_i \cdot C_i + u_{j2}\\[6pt]
+R_i &= \beta_{\text{remind}} + \delta^{\text{sex}}_{s[i]} + \delta^{\text{race}}_{r[i]} + \delta^{\text{lang}}_{l[i]} + \delta^{\text{emp}}_{e[i]} + \delta^{\text{rel}}_{m[i]} + \gamma_{\text{age}}\,\text{age}_i + \gamma_{\text{fam}}\,\text{fam}_i + \boldsymbol\gamma_{\text{con}}^\top \mathbf{c}_i\\
+C_i &= \beta_{\text{carry}} + \boldsymbol\gamma_{\text{carry,con}}^\top \mathbf{c}_i\\[6pt]
+\delta^{(f)} &\sim \text{Normal}(0, \tau), \quad \textstyle\sum_k \delta^{(f)}_k = 0 \text{ for each factor } f\\
+(u_{j1}, u_{j2}) &\sim \text{MVNormal}\big(\mathbf{0},\ \text{diag}(\boldsymbol\sigma_u)\,\boldsymbol\Omega\,\text{diag}(\boldsymbol\sigma_u)\big)
+\end{aligned}
+$$
+
+**What each term means**
+
+*Outcome*
+
+* $p_{1i}, p_{2i}, p_{3i}$: probability that kit $i$ is returned in window 1, 2 or 3, given it was still out when the window began. $\text{logit}(p) = \log\big(p/(1-p)\big)$ puts probabilities on the log-odds scale, where effects add up.
+
+*Baseline and covariates*
+
+* $\alpha_1, \alpha_2, \alpha_3$: baseline log-odds of return in each window for a reference kit: a repeat kit, pre-2022, outside COVID and Oct–Dec, from a patient of average age and household size in every reference category (female, not partnered, full-time employed, Hispanic/Latino, Spanish-speaking, consented to texts), with a patient effect of zero.
+* $\mathbf{x}_i$, $\boldsymbol\beta$: kit $i$'s covariates (age at dispense, household size, first kit, Oct–Dec, COVID period, calendar trend, sex, relationship, employment, race/ethnicity, language, text consent) and their effects. The same $\boldsymbol\beta$ applies in all three windows.
+
+*Timing*
+
+* $\text{post}_i$: 1 if kit $i$ was dispensed on or after January 1, 2022 (reminder era), otherwise 0.
+* $\beta_{\text{post}}$: change in all windows after 2022 that is **not** due to reminders. It is identified mainly from window 1, where no reminder could act.
+* $\text{covid}_i$, $\beta_{\text{covid,late}}$: indicator for kits dispensed March 2020–June 2021, and an extra COVID effect on later returns (windows 2–3), for example from mail delays. The main COVID effect is in $\boldsymbol\beta$.
+
+*Reminder effect*
+
+* $R_i$: the reminder effect for kit $i$ on the log-odds scale. It enters only window 2 and is multiplied by $\text{post}_i$, so it is zero for every pre-2022 kit.
+* $\beta_{\text{remind}}$: the **average reminder effect** for patients who consented to texts, averaged across subgroups.
+* $\delta^{\text{sex}}_{s[i]}, \delta^{\text{race}}_{r[i]}, \delta^{\text{lang}}_{l[i]}, \delta^{\text{emp}}_{e[i]}, \delta^{\text{rel}}_{m[i]}$: how much the reminder effect for the patient's sex, race/ethnicity, language, employment and relationship group differs from the average. $s[i]$ means "the sex group of kit $i$'s patient", and similarly for the others. Each set sums to zero.
+* $\gamma_{\text{age}}, \gamma_{\text{fam}}$: change in the reminder effect per decade of age and per additional household member.
+* $\mathbf{c}_i$, $\boldsymbol\gamma_{\text{con}}$: indicators for "declined texts" and "consent unknown", and how much the reminder effect differs for those patients. These are not shrunk toward the average, so the placebo check is not biased toward finding an effect.
+* $C_i$: the post-period change for kit $i$ in window 3, after texts stopped at day 90 (the "carry-over"). Like $R_i$, it is multiplied by $\text{post}_i$.
+* $\beta_{\text{carry}}$: the carry-over for patients who consented to texts.
+* $\boldsymbol\gamma_{\text{carry,con}}$: how much the carry-over differs for patients who declined texts or whose consent is unknown. Without this term, decliners would be assigned the consenters' carry-over, and the placebo check would partly measure an assumption rather than the data.
+
+*Partial pooling*
+
+* $\tau$: the shared spread of all subgroup deviations $\delta$, learned from the data. A small $\tau$ means subgroups respond similarly and their estimates are pulled toward the average.
+
+*Patients*
+
+* $u_{j1}$: patient $j$'s tendency to return kits promptly (window 1), relative to otherwise similar patients.
+* $u_{j2}$: patient $j$'s tendency to return kits later (windows 2–3).
+* $\boldsymbol\sigma_u$: how much these tendencies vary between patients.
+* $\boldsymbol\Omega$: the correlation between a patient's prompt and later tendencies.
+
+**Why the sum-to-zero constraint?** $\beta_{\text{remind}}$ and the subgroup deviations are added together. Without a constraint, adding any amount to $\beta_{\text{remind}}$ and subtracting it from every $\delta^{\text{sex}}$ gives exactly the same predictions, so neither is identified and $\beta_{\text{remind}}$ loses its meaning. That was one of the problems with the original model. Forcing each set of deviations to sum to zero pins $\beta_{\text{remind}}$ to the average across groups, and makes each $\delta$ a deviation from that average.
+
+## Priors
+
+Priors are weakly informative on the log-odds scale. They rule out implausible values (for example, a single covariate multiplying the odds of return by 1,000) without favouring any particular result. The [Prior Predictive Check](#prior-predictive-check) shows what these priors imply before seeing the data.
+
+| Parameter | Prior | Meaning |
+|---|---|---|
+| Window baselines $\alpha$ | Normal(0, 1.5) | Baseline return probabilities anywhere from about 5% to 95% |
+| Covariate effects $\beta$; $\beta_{\text{post}}$, $\beta_{\text{remind}}$, $\beta_{\text{carry}}$, $\beta_{\text{covid,late}}$, consent terms $\gamma_{\text{con}}$, $\gamma_{\text{carry,con}}$ | Normal(0, 1) | Odds ratios mostly between 0.14 and 7 |
+| Age and household-size moderation $\gamma$ | Normal(0, 0.5) | Modest changes in the reminder effect per unit |
+| Subgroup spread $\tau$ | Half-Normal(0, 0.5) | Subgroup differences are expected to be small unless the data show otherwise |
+| Patient spread $\sigma_u$ | Half-Normal(0, 2) | Allows large differences between patients |
+| Patient correlation $\Omega$ | LKJ(2) | Mildly favours moderate correlations |
+
+# Changes from the Original Model
+
+| | Original (OMED 2025 poster) | New model |
+|---|---|---|
+| Unit of analysis | Patient × period counts (binomial) | Individual kits, followed through three time windows |
+| Repeated kits | Not modelled; kits treated as independent | Patient random effects, correlated across windows |
+| Patients included | Only patients with a post-period kit (1,941 patients) | All patients (`r big(n_distinct(kits$patient_id))`), including `r n_pre_only` with pre-period kits only |
+| Reminder exposure | Every post-period kit treated as exposed | Effect estimated only in days 15–90, when texts were sent; returns after day 90 modelled separately |
+| Time trends | None | Calendar trend, COVID period, season, non-reminder post-2022 change |
+| Age | One age per patient | Age at each kit's dispense date |
+| Subgroup effects | Random slopes on two-level factors (not identifiable); language effect confounded with baseline differences | Sum-to-zero subgroup deviations with one shared, learned shrinkage scale; language main effects included |
+| Placebo check | None | Separate reminder term for patients who declined texts |
+| Kits with unknown return date | n/a | Kept; the model averages over the windows |
+| Reported effect | Odds-scale change described as a percent improvement | Percentage-point change from predicted return rates with reminders on vs. off |
+| Model checks | Posterior predictive checks only | Prior and posterior predictive checks, prior-vs-posterior comparison, convergence diagnostics |
+| Data | Uncleaned extract | Audited data (date corrections, duplicates removed, consistent coding) |
+
+# Results
+
+**How to read the plots.** Bayesian results are distributions, not single numbers. In the interval plots, the dot is the **posterior median** (the most central estimate). The **thick bar** is the 50% credible interval and the **thin bar** is the 95% credible interval. Given the model and the data, there is a 95% probability that the true value lies inside the thin bar. When a thin bar crosses the reference line (0 points, or an odds ratio of 1), the data are consistent with no effect.
+
+## Reminder Effect
+
+```{r headline, fig.height = 6.2}
+p_rd <- tibble(value = pp(rd)) %>%
+  ggplot(aes(x = value)) +
+  stat_halfeye(.width = c(0.5, 0.95), fill = col_main, slab_alpha = 0.35, colour = col_main,
+               point_interval = median_qi) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  scale_x_continuous(labels = pts) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  labs(title = "Reminder effect on the return rate, 2022–2023 kits",
+       subtitle = sprintf("Probability of any benefit: %s     Probability of a gain over 5 points: %s",
+                          prob(rd > 0), prob(rd > 0.05)),
+       x = "Change in return rate (percentage points)")
+
+cf <- long_draws(c("p_off_post", "p_on_post"), c("Reminders off (counterfactual)", "Reminders on (as delivered)")) %>%
+  mutate(label = factor(label, levels = c("Reminders off (counterfactual)", "Reminders on (as delivered)")))
+p_cf <- ggplot(cf, aes(x = pp(value), y = label, fill = label, colour = label)) +
+  stat_halfeye(.width = c(0.5, 0.95), slab_alpha = 0.35, point_interval = median_qi) +
+  scale_fill_manual(values = c(col_off, col_main), guide = "none") +
+  scale_colour_manual(values = c(col_off, col_main), guide = "none") +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "Predicted return rate, 2022–2023 kits", subtitle = "Same kits, same patients",
+       x = "Kits returned", y = NULL)
+p_rd / p_cf
+```
+
+* Among 2022–2023 kits, the reminder program raised the return rate from an estimated **`r med(draws$p_off_post, 100)`%** to **`r med(draws$p_on_post, 100)`%**: a gain of **`r ci(rd, 100, suffix = " points")`**.
+* On the odds scale, reminders multiplied the odds of a return during days 15–90 by **`r ci(draws$or_remind, digits = 2)`**.
+* After texts stopped at day 90, the post-period odds of a very late return were `r ci(draws$or_carry, digits = 2)` times higher than before 2022. This could be patients acting on the final texts a little after day 90, or another post-2022 change that affected only very late returns; these data cannot tell the two apart. It is included in the overall reminder effect above. Only `r big(cnt(c("w3", "never")))` of `r big(nrow(kits))` kits were still out at day 90, but this term may still account for a meaningful share of the gain. A breakdown of the effect by window is listed under [Limitations and Next Steps](#limitations-and-next-steps).
+* **Other changes after 2022 had no clear effect**: odds ratio `r ci(exp(draws$beta_post), digits = 2)`. Once time trends, COVID and season are accounted for, the rise in returns is attributed to the reminders rather than to a general improvement.
+
+## Text-Consent Placebo Check
+
+```{r placebo, fig.height = 2.6}
+pl <- long_draws(grp$variable[grp$factor == "text_consent"],
+                 paste("Consent:", grp$level[grp$factor == "text_consent"])) %>%
+  filter(label != "Consent: Unknown") %>%
+  mutate(label = recode(label, "Consent: Yes" = "Consented to texts", "Consent: No" = "Declined texts"),
+         label = factor(label, levels = c("Declined texts", "Consented to texts")))
+ggplot(pl, aes(x = pp(value), y = label)) +
+  stat_pointinterval(.width = c(0.5, 0.95), colour = col_main, point_size = 2.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  scale_x_continuous(labels = pts) +
+  labs(title = "Reminder effect by text consent", x = "Change in return rate (percentage points)", y = NULL)
+```
+
+Patients who declined text messages should not have received reminders, so their true reminder effect should be zero. **The model does not force this.** Their post-period kits pass through windows 2 and 3 like every other kit:
+
+* In days 15–90, their effect is $R_i = \beta_{\text{remind}} + (\text{subgroup terms}) + \gamma_{\text{con,No}}$.
+* After day 90, it is $C_i = \beta_{\text{carry}} + \gamma_{\text{carry,con,No}}$.
+
+The two consent terms are estimated freely and are not pulled toward the other groups. If the decliners' returns had risen as much as the consenters', both terms would be near zero. On the log-odds scale:
+
+* **Days 15–90:** the decliners' effect is $\beta_{\text{remind}} + \gamma_{\text{con,No}}$ = `r ci(draws$beta_remind + draws[["gamma_con[1]"]], digits = 2)`, versus $\beta_{\text{remind}}$ = `r ci(draws$beta_remind, digits = 2)` for consenters.
+* **After day 90:** the decliners' carry-over is $\beta_{\text{carry}} + \gamma_{\text{carry,con,No}}$ = `r ci(draws$beta_carry + draws[["gamma_carry_con[1]"]], digits = 2)`, versus $\beta_{\text{carry}}$ = `r ci(draws$beta_carry, digits = 2)` for consenters.
+
+On the probability scale, the decliners' estimated gain is **`r ci(rd_g("text_consent", "No"), 100, suffix = " points")`**, compared with `r ci(rd_g("text_consent", "Yes"), 100, suffix = " points")` for patients who consented. The probability that consenters gained more is `r prob(rd_g("text_consent", "Yes") > rd_g("text_consent", "No"))`. This group is small (`r sum(kits$post == 1 & kits$text_consent == "No")` post-period kits, few of them still out at day 90), so the intervals are wide.
+
+> **Author note:** confirm with the clinic that patients who declined texts received no reminders by any other route.
+
+## Reminder Effects by Subgroup
+
+```{r subgroups, fig.height = 7.5}
+sg <- long_draws(grp$variable, grp$level) %>%
+  left_join(grp %>% select(variable, factor_label), by = "variable") %>%
+  filter(factor_label != "Text consent") %>%
+  mutate(factor_label = factor(factor_label, levels = c("Sex", "Race/ethnicity", "Language", "Employment", "Relationship")))
+sg$row <- factor(paste(sg$factor_label, sg$label, sep = "|"),
+                 levels = levels(row_key(grp$factor_label, grp$level)))
+ggplot(sg, aes(x = pp(value), y = row)) +
+  annotate("rect", xmin = quantile(pp(rd), 0.025), xmax = quantile(pp(rd), 0.975),
+           ymin = -Inf, ymax = Inf, fill = col_main, alpha = 0.08) +
+  geom_vline(xintercept = median(pp(rd)), colour = col_main, linewidth = 0.4) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  stat_pointinterval(.width = c(0.5, 0.95), colour = col_main, point_size = 2) +
+  facet_grid(factor_label ~ ., scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_discrete(labels = strip_key) +
+  scale_x_continuous(labels = pts) +
+  labs(title = "Reminder effect by subgroup",
+       subtitle = "Percentage-point gain in return rate, 2022–2023 kits.\nShaded band and solid line: overall effect (95% CrI and median)",
+       x = "Change in return rate (percentage points)", y = NULL) +
+  facet_strip_left
+```
+
+**What this plot shows.** Each row is the **total reminder effect for kits in that subgroup**, in percentage points: the model's predicted return rate with reminders minus without, averaged over the subgroup's 2022–2023 kits. It combines the average effect ($\beta_{\text{remind}}$), that group's deviation (its $\delta$, i.e. the reminder × subgroup interaction), and the other characteristics of the patients in that group. The interaction terms themselves, on the log-odds scale, are in the appendix ([Subgroup Deviations](#subgroup-deviations)). Because reminders act only in window 2 of post-period kits, each $\delta$ is effectively a three-way interaction: *post-2022 × days 15–90 × subgroup*.
+
+* **Sex.** Women gained `r ci(rd_g("sex", "Female"), 100, suffix = " points")` and men `r ci(rd_g("sex", "Male"), 100, suffix = " points")`. The probability that women benefited more is `r prob(sex_gap > 0)`.
+* **Age.** The reminder effect changes by `r ci(draws$gamma_age, digits = 2)` on the log-odds scale per additional decade of age. The probability that it grows with age is `r prob(draws$gamma_age > 0)`.
+* **Race/ethnicity, language, employment and relationship.** The estimated differences are small and their intervals overlap the overall effect. The model shrinks these subgroups toward the overall estimate unless the data show a clear difference, and here they do not.
+* **A note on percentage points.** The same relative effect produces a larger percentage-point gain in groups with lower baseline return rates. For example, Polish-speaking patients show a larger gain (`r med(rd_g("language", "Polish"), 100)` points) than Spanish-speaking patients (`r med(rd_g("language", "Spanish"), 100)` points), but this mostly reflects their lower baseline, not a stronger response to reminders. Patients whose language had no matching text version ("Other") still gained `r med(rd_g("language", "Other"), 100)` points. The data do not show that language-matched messages drove the effect.
+
+## Other Predictors of Return
+
+```{r covariates, fig.height = 8.8}
+cv <- long_draws(or_lab$variable, or_lab$label) %>%
+  left_join(or_lab %>% select(variable, domain), by = "variable") %>%
+  mutate(or = exp(value))
+cv$row <- factor(paste(cv$domain, cv$label, sep = "|"), levels = levels(row_key(or_lab$domain, or_lab$label)))
+ggplot(cv, aes(x = or, y = row)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  stat_pointinterval(.width = c(0.5, 0.95), colour = col_main, point_size = 2) +
+  facet_grid(domain ~ ., scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_discrete(labels = strip_key) +
+  scale_x_log10(breaks = c(0.25, 0.5, 1, 2, 4, 8), labels = c("0.25", "0.5", "1", "2", "4", "8")) +
+  coord_cartesian(xlim = c(0.2, 8)) +
+  labs(title = "Odds ratios for returning a kit",
+       subtitle = "Adjusted for all other factors shown and for patient-to-patient differences.\nLog scale; 1 = no association",
+       x = "Odds ratio (log scale)", y = NULL,
+       caption = "Patient characteristics and timing apply to all windows.\nThe reminder odds ratios apply to days 15–90 and after day 90 of 2022–2023 kits.") +
+  facet_strip_left
+```
+
+These odds ratios describe **who returns kits**, regardless of reminders. They are adjusted for one another and for each patient's own tendency to return.
+
+* **Timing.** Kits dispensed in October–December were less likely to be returned (odds ratio `r ci(exp(xb("q4")), digits = 2)`), as were kits dispensed during the COVID period (`r ci(exp(xb("covid")), digits = 2)`). The Oct–Dec effect holds after adjusting for the calendar trend and patient characteristics. Plausible explanations include holiday disruption and travel, winter mail delays, and year-end outreach pushes that reach less-engaged patients. These data cannot distinguish between them.
+* **Age.** Older patients were more likely to return kits: odds ratio `r ci(exp(xb("age_c10")), digits = 2)` per decade.
+* **Relationship.** Partnered patients were more likely to return kits: `r ci(exp(xb("relationshipPartnered")), digits = 2)`.
+* **Sex.** Sex was not clearly associated with the baseline return rate (`r ci(exp(xb("sexMale")), digits = 2)` for men). Differences by sex in the *response to reminders* are shown in [Reminder Effects by Subgroup](#reminder-effects-by-subgroup).
+* **Race/ethnicity and language** intervals are wide because most groups are small; none is clearly different from the reference group.
+* **These are conditional (patient-specific) odds ratios.** They compare kits from patients with the same patient effect. Population-averaged odds ratios, which compare the groups as a whole, are smaller in magnitude because of the large differences between patients described below.
+
+## Patient Random Effects
+
+```{r re-select}
+# Choose illustrative patients from the posterior summaries (labelled A-F; no IDs shown)
+pr <- pat_re %>% select(pat, window, q50, n_kits, n_returned, n_w1, n_pre, n_post) %>%
+  pivot_wider(names_from = window, values_from = q50)
+multi  <- pr %>% filter(n_kits >= 4)
+single <- pr %>% filter(n_kits == 1)
+pick <- function(df, score) df$pat[which.max(score)]
+sel <- c(A = pick(multi, multi$prompt + multi$later))
+sel["B"] <- pick(multi %>% filter(!pat %in% sel), -(multi$prompt + multi$later)[!multi$pat %in% sel])
+mrest <- multi %>% filter(!pat %in% sel)
+sel["C"] <- pick(mrest, -(abs(mrest$prompt) + abs(mrest$later)))
+mrest <- multi %>% filter(!pat %in% sel)
+sel["D"] <- pick(mrest, mrest$later - mrest$prompt)
+s_ret <- single %>% filter(n_returned == 1, n_w1 == 1)
+sel["E"] <- pick(s_ret, -abs(s_ret$prompt - median(s_ret$prompt)))
+s_no  <- single %>% filter(n_returned == 0)
+sel["F"] <- pick(s_no, -abs(s_no$prompt - median(s_no$prompt)))
+
+why <- c(A = "Strongly positive: returned every kit, mostly within 14 days.",
+         B = "Strongly negative: returned few or none of several kits.",
+         C = "Near neutral, with plenty of data: a typical patient, estimated precisely.",
+         D = "Needs a nudge: slow to return early, but reliably returns later.",
+         E = "One kit, returned by day 14: little information, so the estimate stays near zero (shrinkage).",
+         F = "One kit, never returned: also shrunk toward zero, with a wide interval.")
+
+sel_tbl <- tibble(id = names(sel), pat = unname(sel)) %>%
+  left_join(pr, by = "pat") %>%
+  mutate(record = sprintf("%d kit%s, %d returned (%d by day 14)", n_kits, ifelse(n_kits > 1, "s", ""),
+                          n_returned, n_w1),
+         label = paste0(id, " · ", record))
+
+# Posterior draws for the selected patients: u_j = diag(sigma_u) L_u z_j
+zvars <- c("sigma_u", "L_u", paste0("z_u[1,", sel, "]"), paste0("z_u[2,", sel, "]"))
+zd <- as_draws_df(read_cmdstan_csv(csvs, variables = zvars, sampler_diagnostics = "")$post_warmup_draws)
+u_sel <- map_dfr(seq_along(sel), function(k) {
+  j <- sel[k]
+  z1 <- zd[[sprintf("z_u[1,%d]", j)]]; z2 <- zd[[sprintf("z_u[2,%d]", j)]]
+  tibble(id = names(sel)[k],
+         `Prompt returns (window 1)`          = zd$`sigma_u[1]` * z1,
+         `Later returns (windows 2–3)`        = zd$`sigma_u[2]` * (zd$`L_u[2,1]` * z1 + zd$`L_u[2,2]` * z2))
+}) %>%
+  pivot_longer(-id, names_to = "window") %>%
+  left_join(sel_tbl %>% select(id, label), by = "id") %>%
+  mutate(window = factor(window, levels = c("Prompt returns (window 1)", "Later returns (windows 2–3)")),
+         label = factor(label, levels = rev(sel_tbl$label)))
+```
+
+Each patient has two random effects: a tendency to return kits **promptly** (window 1) and a tendency to return them **later** (windows 2–3). A value of 0 means "typical for someone with these characteristics". Positive values mean more likely to return, negative values less likely, on the log-odds scale.
+
+**How large are the differences between patients?**
+
+```{r mor, fig.height = 2.8}
+pv <- tibble(`Window 1 (days 0–14)` = mor1, `Windows 2–3 (day 15+)` = mor2) %>%
+  pivot_longer(everything()) %>%
+  mutate(name = factor(name, levels = c("Windows 2–3 (day 15+)", "Window 1 (days 0–14)")))
+ggplot(pv, aes(x = value, y = name)) +
+  stat_halfeye(.width = c(0.5, 0.95), fill = col_main, slab_alpha = 0.35, colour = col_main) +
+  labs(title = "Median odds ratio between patients",
+       subtitle = "How much the odds of return differ between two patients\nwith identical characteristics",
+       x = "Median odds ratio", y = NULL)
+```
+
+The **median odds ratio** compares two randomly chosen patients with identical recorded characteristics. For returns after day 14 it is `r ci(mor2, digits = 1)`: a typical pair of otherwise identical patients differs roughly `r med(mor2, digits = 0)`-fold in their odds of returning a kit. This is larger than any covariate effect in [Other Predictors of Return](#other-predictors-of-return). It is why ignoring repeated kits from the same patient (as a chi-square test or the original model does) understates uncertainty. A patient's prompt and later tendencies are positively correlated (`r ci(draws$rho_u, digits = 2)`): prompt returners also tend to be eventual returners, but the two are distinct.
+
+**All `r big(nrow(pr))` patients**
+
+```{r re-all, fig.height = 4.2}
+all_re <- pat_re %>%
+  mutate(window = factor(recode(window, prompt = "Prompt returns (window 1)", later = "Later returns (windows 2–3)"),
+                         levels = c("Prompt returns (window 1)", "Later returns (windows 2–3)"))) %>%
+  group_by(window) %>% mutate(rank = rank(q50, ties.method = "first")) %>% ungroup()
+hl <- all_re %>% inner_join(tibble(id = names(sel), pat = unname(sel)), by = "pat")
+ggplot(all_re, aes(x = rank, y = q50)) +
+  geom_linerange(aes(ymin = q2.5, ymax = q97.5), colour = "#cde2fb", linewidth = 0.25) +
+  geom_point(colour = col_main, size = 0.25) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  geom_linerange(data = hl, aes(ymin = q2.5, ymax = q97.5), colour = col_alt, linewidth = 0.8) +
+  geom_point(data = hl, colour = col_alt, size = 1.8) +
+  geom_label(data = hl, aes(label = id), size = 2.8, colour = col_alt, label.size = 0, fill = "white",
+             nudge_y = 0.9, label.padding = unit(1.5, "pt")) +
+  facet_wrap(~ window) +
+  labs(title = "Patient random effects, ranked",
+       subtitle = "Each line is one patient's 95% credible interval; dots are posterior medians.\nOrange: the patients shown below",
+       x = "Patients, ranked by posterior median", y = "Patient effect (log-odds)")
+```
+
+Most intervals are wide and overlap zero, because most patients contributed only one or two kits. The model does not over-interpret thin data: it pulls those patients toward the average (shrinkage) and only moves a patient far from zero when they have a consistent record across several kits.
+
+**Selected patients**
+
+```{r re-selected, fig.height = 4.6}
+ggplot(u_sel, aes(x = value, y = label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  stat_halfeye(.width = c(0.5, 0.95), fill = col_main, slab_alpha = 0.35, colour = col_main,
+               point_size = 1.6, height = 0.85) +
+  facet_wrap(~ window) +
+  labs(title = "Full posterior distributions for six patients",
+       subtitle = "Letters match the ranked plot above; records show kits received and returned",
+       x = "Patient effect (log-odds)", y = NULL)
+```
+
+These six patients were chosen to show the range of patient effects and how the amount of data changes the estimate. Patient identifiers are not shown.
+
+```{r re-why, results = "asis"}
+cat(paste0("* **", sel_tbl$id, "** (", sel_tbl$record, "). ", why[sel_tbl$id], "\n"), sep = "")
+```
+
+**Do patient effects absorb demographic effects?** Not by design. The demographics are in the model as fixed effects ($\boldsymbol\beta$), and the patient effects are centred at zero *given* those demographics. They capture only the variation left over after age, sex, language and the other characteristics are accounted for. The model does assume that this leftover variation is unrelated to the demographics. If an unmeasured trait (for example, health literacy) differs between language groups, part of it will appear in the language coefficients rather than in the patient effects. The demographic odds ratios are therefore **adjusted associations, not causal effects**. The reminder effect is protected from this, because it is estimated from changes *within* windows and periods rather than from comparisons between demographic groups.
+
+# Model Checking
+
+## Convergence
+
+```{r convergence}
+conv <- summarise_draws(subset_draws(raw$post_warmup_draws, variable = model_pars),
+                        "rhat", "ess_bulk", "ess_tail")
+n_div <- sum(sdiag$divergent__)
+```
+
+The model was fitted with Stan (`r n_chains` chains, `r big(n_draws)` post-warmup draws in total). Standard diagnostics show no sign of sampling problems:
+
+* **Divergent transitions:** `r n_div` (target: 0).
+* **R-hat** (agreement between chains): maximum `r sprintf("%.3f", max(conv$rhat))` across `r nrow(conv)` parameters (target: below 1.01).
+* **Effective sample size:** minimum bulk ESS `r round(min(conv$ess_bulk))`, minimum tail ESS `r round(min(conv$ess_tail))` (target: above 400). The lowest value is for `r conv$variable[which.min(conv$ess_bulk)]`.
+
+Trace plots for key parameters are in the appendix.
+
+**Computation time.** The `r n_chains` chains ran in parallel and took `r sprintf("%.1f", timing$total / 60)` minutes in total (per chain: `r paste(sprintf("%.1f", timing$chains$total / 60), collapse = ", ")` minutes, including warmup). The model includes `r big(2 * nrow(pr))` patient effects.
+
+## Posterior Predictive Check
+
+```{r ppc, fig.height = 4.6}
+ppc_lab <- tribble(
+  ~variable,         ~label,                                             ~period,
+  "rep_ret_pre",     "Kits returned",                                    "Pre",
+  "rep_ret_post",    "Kits returned",                                    "Post",
+  "rep_w1_pre",      "Returned by day 14",                               "Pre",
+  "rep_w1_post",     "Returned by day 14",                               "Post",
+  "rep_w2_pre",      "Returned days 15–90 (of kits still out)",          "Pre",
+  "rep_w2_post",     "Returned days 15–90 (of kits still out)",          "Post",
+  "rep_w3_pre",      "Returned after day 90 (of kits still out)",        "Pre",
+  "rep_w3_post",     "Returned after day 90 (of kits still out)",        "Post",
+  "rep_all_multi",   "Multi-kit patients returning every kit",           "All",
+  "rep_none_multi",  "Multi-kit patients returning no kit",              "All") %>%
+  mutate(row = paste0(label, if_else(period == "All", "", paste0(" — ", period))))
+ppc_levels <- rev(ppc_lab$row)
+ppc_d <- long_draws(ppc_lab$variable) %>% select(-label) %>% left_join(ppc_lab, by = "variable") %>%
+  mutate(row = factor(row, levels = ppc_levels))
+ppc_o <- ppc_obs %>% left_join(ppc_lab, by = "variable") %>% mutate(row = factor(row, levels = ppc_levels))
+ggplot(ppc_d, aes(x = pp(value), y = row)) +
+  stat_pointinterval(.width = c(0.5, 0.95), colour = col_main, point_size = 1.8) +
+  geom_point(data = ppc_o, aes(x = pp(observed)), shape = 23, size = 3, fill = col_alt, colour = "white", stroke = 0.6) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "Posterior predictive check",
+       subtitle = "Blue: range of values the fitted model predicts. Orange diamond: what was actually observed",
+       x = NULL, y = NULL)
+```
+
+The fitted model simulates new datasets from its own estimates. If it describes the data well, the observed values (orange) should fall within the predicted ranges (blue). They do for every statistic checked, including the share of patients who return **all** or **none** of their kits. A model without patient effects cannot reproduce this all-or-none pattern.
+
+## Prior Predictive Check
+
+```{r prior-pc, fig.height = 4.8}
+prior_rd <- prior_draws$rd_post
+pc_lab <- tribble(
+  ~variable,        ~label,
+  "rep_ret_post",   "Kits returned, 2022–2023",
+  "rep_w1_post",    "Returned by day 14, 2022–2023",
+  "rep_all_multi",  "Multi-kit patients returning every kit",
+  "rd_post",        "Reminder effect (points)")
+pc <- bind_rows(
+  long_draws(pc_lab$variable, pc_lab$label, prior_draws) %>% mutate(source = "Prior"),
+  long_draws(pc_lab$variable, pc_lab$label, draws)       %>% mutate(source = "Posterior")) %>%
+  mutate(label = factor(label, levels = pc_lab$label), source = factor(source, levels = c("Prior", "Posterior")))
+pc_obs <- ppc_obs %>% filter(variable %in% pc_lab$variable) %>%
+  mutate(label = factor(pc_lab$label[match(variable, pc_lab$variable)], levels = pc_lab$label))
+ggplot(pc, aes(x = pp(value), y = source, fill = source, colour = source)) +
+  stat_halfeye(.width = c(0.5, 0.95), slab_alpha = 0.35, normalize = "groups", point_size = 1.6) +
+  geom_vline(data = pc_obs, aes(xintercept = pp(observed)), colour = col_alt, linewidth = 0.6) +
+  facet_wrap(~ label, scales = "free_x", ncol = 2) +
+  scale_fill_manual(values = c(Prior = col_off, Posterior = col_main), guide = "none") +
+  scale_colour_manual(values = c(Prior = col_off, Posterior = col_main), guide = "none") +
+  labs(title = "Prior predictive check",
+       subtitle = "Grey: what the model predicts before seeing any data (priors only). Blue: after fitting.\nOrange line: observed value",
+       x = "Percent (reminder effect: percentage points)", y = NULL)
+```
+
+The same model was run with the data switched off, so its predictions come from the priors alone. A good prior allows every plausible result, including the one actually observed, without pushing toward any particular answer.
+
+* **Return rates.** Before seeing data, the model considers post-period return rates from `r sprintf("%.0f%%", 100 * quantile(prior_draws$rep_ret_post, 0.025))` to `r sprintf("%.0f%%", 100 * quantile(prior_draws$rep_ret_post, 0.975))` plausible (95% range), and the observed `r obs_pct("rep_ret_post")` falls inside. The prior leans toward high overall return rates (median `r sprintf("%.0f%%", 100 * median(prior_draws$rep_ret_post))`), because each kit has three windows in which it can be returned; the return rate for any single window (e.g. by day 14) is centred near 50%. The data quickly override this lean.
+* **All-or-none patients.** The priors already expect many multi-kit patients to return every kit or none, because they allow large patient differences ($\sigma_u$ up to about 4). The observed share sits inside this range, so the prior is not in conflict with the data.
+* **Reminder effect.** Before seeing data, the reminder effect is centred on zero, with a 95% range of `r sprintf("%.0f", 100 * quantile(prior_rd, 0.025))` to `r sprintf("%+.0f", 100 * quantile(prior_rd, 0.975))` points. The prior is neutral: it allows reminders to help, harm or do nothing. After fitting, the effect is concentrated at `r med(rd, 100)` points, so the conclusion comes from the data.
+
+## Prior vs. Posterior
+
+```{r prior-post, fig.height = 3.2}
+pp_vars <- tibble(
+  variable = c("beta_remind", "beta_post", "tau"),
+  label    = c("Reminder effect (log-odds)", "Other post-2022 change (log-odds)", "Subgroup spread τ"),
+  prior_sd = c(1, 1, 0.5), half = c(FALSE, FALSE, TRUE))
+prior_curves <- pp_vars %>% rowwise() %>%
+  reframe(label = label, x = seq(if (half) 0 else -3, 3, length.out = 300),
+          dens = if (half) 2 * dnorm(x, 0, prior_sd) else dnorm(x, 0, prior_sd))
+post_d <- long_draws(pp_vars$variable, pp_vars$label)
+ggplot() +
+  stat_slab(data = post_d, aes(x = value, y = 0), fill = col_main, alpha = 0.45, normalize = "panels",
+            height = 1, scale = 1) +
+  geom_line(data = prior_curves %>% group_by(label) %>% mutate(dens = dens / max(dens)),
+            aes(x, dens), colour = col_off, linetype = "dashed", linewidth = 0.6) +
+  facet_wrap(~ factor(label, levels = pp_vars$label), scales = "free_x") +
+  scale_y_continuous(NULL, breaks = NULL) +
+  labs(title = "Prior (dashed) versus posterior (blue)",
+       subtitle = "Curves scaled to the same height. A posterior much narrower than its prior\nmeans the data, not the prior, drive the estimate",
+       x = NULL)
+```
+
+For the reminder effect and the post-2022 change, the posteriors are far narrower than the priors, so the data rather than the prior assumptions determine these results. The subgroup spread τ is informed by the data but stays close to zero, which is why subgroup estimates are pulled toward the overall effect.
+
+# Limitations and Next Steps
+
+**Limitations**
+
+* **Observational design.** There is no randomised control group. The window comparison and the consent placebo strengthen the causal interpretation, but they rest on the assumption stated in [Three-Window Design](#three-window-design).
+* **Cohort definition.** Patients were identified through FIT orders between November 2021 and November 2023. Pre-period kits therefore come only from patients who were still with the clinic in the reminder era.
+* **Exposure.** Individual text delivery was not recorded. Consenting patients with a post-period kit still out at day 14 are assumed to have received reminders until return or day 90.
+* **Small subgroups.** Several race/ethnicity and language groups have fewer than 50 patients, so their estimates are uncertain.
+* **Shared later-return effect.** Windows 2 and 3 share one patient effect, because few kits reach window 3. This assumes a patient's tendency to return during days 15–90 and after day 90 is the same.
+
+**Pending analyses** *(update this list as analyses are completed)*
+
+- [ ] Pre-period placebo test: a fake reminder start in 2021 should show no effect (checks the key assumption)
+- [ ] Prior sensitivity: refit with wider and narrower priors
+- [ ] Frequentist cross-check (generalized linear mixed model with the same structure)
+- [ ] Sensitivity: guideline-eligible ages only (50–75 before May 2021, 45–75 after)
+- [ ] Sensitivity: exclude Oct–Dec 2023
+- [ ] Sensitivity: patients with kits in both periods only
+
+**Candidate model extensions**
+
+- [ ] Split the overall reminder effect into its days 15–90 and after-day-90 parts (percentage points)
+- [ ] Reminder effect changing over the post period (e.g. 2022 vs. 2023)
+- [ ] Reminder effect for first vs. repeat kits
+- [ ] Cohort-composition term (each patient's share of post-period kits), so the post-2022 change is estimated within patients
+- [ ] Window-specific covariate effects (e.g. employment may affect prompt returns more than later ones)
+
+# Appendix
+
+## Subgroup Deviations
+
+```{r het, fig.height = 6.5}
+het_vars <- c(grep("^d_(sex|race|lang|emp|rel)\\[", names(draws), value = TRUE),
+              "gamma_age", "gamma_fam", "gamma_con[1]", "gamma_con[2]", "gamma_carry_con[1]", "gamma_carry_con[2]")
+lv <- function(prefix, f) setNames(levels(kits[[f]]), paste0(prefix, "[", seq_along(levels(kits[[f]])), "]"))
+het_names <- c(lv("d_sex", "sex"), lv("d_race", "race_eth"), lv("d_lang", "language"),
+               lv("d_emp", "employment"), lv("d_rel", "relationship"),
+               gamma_age = "Age (per 10 years)", gamma_fam = "Household size (per person)",
+               `gamma_con[1]` = "Declined texts, days 15–90", `gamma_con[2]` = "Consent unknown, days 15–90",
+               `gamma_carry_con[1]` = "Declined texts, after day 90", `gamma_carry_con[2]` = "Consent unknown, after day 90")
+het_fac <- c(sub("\\[.*", "", grep("^d_", het_vars, value = TRUE)), "continuous", "continuous",
+             "consent", "consent", "consent", "consent")
+het_fac <- recode(het_fac, d_sex = "Sex", d_race = "Race/ethnicity", d_lang = "Language", d_emp = "Employment",
+                  d_rel = "Relationship", continuous = "Continuous", consent = "Text consent (unpooled)")
+hd <- long_draws(het_vars, unname(het_names[het_vars])) %>%
+  mutate(fac = factor(het_fac[match(variable, het_vars)],
+                      levels = c("Sex", "Race/ethnicity", "Language", "Employment", "Relationship", "Continuous", "Text consent (unpooled)")),
+         row = factor(paste(fac, label, sep = "|"),
+                      levels = levels(row_key(het_fac, unname(het_names[het_vars])))))
+ggplot(hd, aes(x = value, y = row)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  stat_pointinterval(.width = c(0.5, 0.95), colour = col_main, point_size = 1.8) +
+  facet_grid(fac ~ ., scales = "free_y", space = "free_y", switch = "y") +
+  scale_y_discrete(labels = strip_key) +
+  labs(title = "Deviations from the average reminder effect (log-odds)",
+       subtitle = "The reminder × subgroup interaction terms. Factor deviations sum to zero within each factor;\n0 = same as average",
+       x = "Deviation (log-odds)", y = NULL) +
+  facet_strip_left
+```
+
+## Trace Plots
+
+```{r trace, fig.height = 5}
+color_scheme_set(c("#cde2fb", "#86b6ef", "#3987e5", "#2a78d6", "#1c5cab", "#104281"))
+mcmc_trace(raw$post_warmup_draws, pars = c("beta_remind", "beta_carry", "beta_post", "tau", "sigma_u[2]", "rho_u"),
+           facet_args = list(ncol = 3)) +
+  theme_crc() + theme(legend.position = "none")
+```
+
+## Stan Code
+
+```{r stan-code, echo = FALSE, comment = ""}
+cat(readLines(path(params$stan_file)), sep = "\n")
+```
+
+## Reproducibility
+
+```{r repro, echo = FALSE, comment = ""}
+cat("Model output:", params$model_dir,
+    "\nPrior-only output:", params$prior_dir,
+    "\nCmdStan:", cmdstan_version(),
+    "\nR:", paste0(R.version$major, ".", R.version$minor),
+    "\nFit script: 02_scripts/03_fit_stage_model.R",
+    "\nReport rendered:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n")
+```

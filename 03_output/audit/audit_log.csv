@@ -1,0 +1,40 @@
+area,check,n,action
+structure,rows in raw file,2092,one row per patient
+structure,duplicate patientid,0,none expected
+kits,kit records in slots 1-8,4305,source of truth
+kits,kit records missing dispense date,0,none expected
+kits,lowercase 'y' in Returned,1,uppercased to Y
+kits,return dates corrected (typo / text),7,corrected; see corrections.csv
+kits,return dates unrecoverable (UNK / before dispense),4,set NA; returned status kept as Y
+kits,Returned = N but return date present,1,recoded to Y (2022/23 copy agrees)
+kits,Returned flag missing,0,none expected
+kits,Returned = Y but no return date (after fixes),4,kept as returned; days_to_return NA
+kits,distinct raw Result spellings,13,normalised to 4 levels
+kits,same-day kit pairs,5,inspected
+kits,same-day blank duplicate removed,3,dropped (one returned record kept)
+kits,kits with days_to_return > 365,2,kept; flagged via returned_90d = 0
+kits,non-returned kits re-issued within 30 d,9,kept; flagged reissued_next_30d
+kits,latest return date in file (extraction proxy),2024-06-05,used for days_followup
+crosscheck,post kits matched in 2022/23 block,2548,agree
+crosscheck,post kits only in slots 1-8,7,2022/23 copy is incomplete
+crosscheck,kits only in 2022/23 block,0,"none expected (copy, not extra kits)"
+crosscheck,post kits with disagreeing fields,6,slots 1-8 kept unless shown wrong (see corrections)
+patients,sex missing (patientsex),0,complete; gender-identity columns not used
+patients,text consent missing,40,level 'Unknown'
+patients,text consent = No,117,potential comparison group (no reminders)
+patients,employment missing,203,level 'Unknown' (sheet had coded these as unemployed)
+patients,marital status missing/UNKNOWN,39,level 'Unknown'
+patients,language missing,3,level 'Unknown'
+patients,language 'SPN/OTH',1,mapped to Other
+patients,race/ethnicity differs from sheet's adjusted column,17,re-derived consistently; see race_eth_recode.csv
+patients,family size outside 1-8,0,none
+crosscheck,patients where sheet's kit totals differ from rebuilt,10,rebuilt counts used; sheet summary columns dropped
+eligibility,kits dispensed at age < 45,211,kept; flagged age_in_45_75 = 0
+eligibility,kits dispensed at age >= 76,35,kept; flagged age_in_45_75 = 0
+patients,patients with kits in both periods,876,within-patient pre/post contrast
+patients,patients with pre-period kits only,148,
+patients,patients with post-period kits only,1068,
+final,kits in analysis table,4302,
+final,patients,2092,
+final,pre-period kits,1742,
+final,post-period kits,2560,

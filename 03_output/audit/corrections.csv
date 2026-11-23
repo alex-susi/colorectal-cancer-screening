@@ -1,0 +1,12 @@
+patient_id,slot,fixed_return_date,reason
+23460,1,2021-11-22,typed as '11/22/221'; dispensed 2021-11-09
+23083,1,2021-12-02,typed as '12/2/221'; dispensed 2021-11-17
+15120,2,2021-11-16,typed as '11/16/221'; dispensed 2021-10-06
+17633,4,2022-06-24,stored as text '6/24/2022'
+14467,1,2021-12-09,recorded 1921-12-09 (century typo); dispensed 2021-09-14
+21702,2,2022-07-13,recorded 2002-07-13 (year typo); dispensed 2022-06-29
+11984,2,2024-01-09,"recorded 2023-01-09, before 2023-12-29 dispense; 2022/23 block has 2024-01-09"
+23225,1,NA,"recorded 2021-07-14, before 2021-08-12 dispense; no recoverable date"
+25967,1,NA,'UNK'; 2022/23 copy holds 1964-04-03 (invalid)
+19132,4,NA,'UNK'
+15458,4,NA,'UNK'

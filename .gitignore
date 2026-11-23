@@ -1,0 +1,11 @@
+# R session and RStudio state
+.RData
+.Rhistory
+.Rproj.user/
+
+# CmdStan posterior draws (large; regenerate with 02_scripts/03_fit_stage_model.R)
+03_output/models/*/stage_model-[0-9]*.csv
+03_output/models/*/stage_model_prior-[0-9]*.csv
+
+# Compiled Stan executables
+*.exe

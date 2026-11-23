@@ -1,0 +1,14 @@
+patient_id,slot,dispense_date,returned,return_date,result,b_slot,b_returned_raw,b_return_date_raw,b_result_raw,b_returned,b_return_date,status
+15399,2,2022-05-31,0,NA,NA,NA,NA,NA,NA,NA,NA,only in slots 1-8
+16639,2,2022-06-01,0,NA,NA,NA,NA,NA,NA,NA,NA,only in slots 1-8
+17454,1,2023-09-08,1,2023-09-09,Positive,NA,NA,NA,NA,NA,NA,only in slots 1-8
+17633,4,2022-06-03,1,2022-06-24,Negative,2022/23,Y,6/24/2022,Negative,1,NA,return date differs
+21702,2,2022-06-29,1,2022-07-13,Negative,2022/23,Y,37450,Negative,1,2002-07-13,return date differs
+22044,1,2023-01-18,1,2023-02-02,Negative,NA,NA,NA,NA,NA,NA,only in slots 1-8
+23957,1,2022-11-19,1,2022-11-22,Negative,2022/23,Y,44877,Negative,1,2022-11-12,return date differs
+24586,1,2023-01-20,1,2023-02-16,Negative,NA,NA,NA,NA,NA,NA,only in slots 1-8
+25967,1,2023-12-19,1,NA,Negative,2022/23,Y,23470,Negative,1,1964-04-03,return date differs
+2837,1,2023-04-18,1,2023-04-19,Negative,2022/23,Y,45025,Negative,1,2023-04-09,return date differs
+319,5,2023-10-26,1,2023-11-11,Negative,NA,NA,NA,NA,NA,NA,only in slots 1-8
+4133,5,2023-12-09,1,2023-12-28,Negative,NA,NA,NA,NA,NA,NA,only in slots 1-8
+622,5,2023-01-21,1,2023-01-30,Negative,2022/23 3rd,Y,45260,Negative,1,2023-11-30,return date differs

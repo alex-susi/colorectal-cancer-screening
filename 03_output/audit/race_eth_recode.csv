@@ -1,0 +1,55 @@
+ethnicity_raw,race_raw,race_eth_sheet,race_eth,n
+Central American,Other Race,Hispanic/Latino,Hispanic/Latino,2
+Central American,Patient Declined,Hispanic/Latino,Hispanic/Latino,3
+Central American,White,Hispanic/Latino,Hispanic/Latino,1
+Chilean,Other Race,Hispanic/Latino,Hispanic/Latino,1
+Colombian,Other Race,Hispanic/Latino,Hispanic/Latino,2
+Colombian,White,Hispanic/Latino,Hispanic/Latino,2
+Dominican,Other Race,Hispanic/Latino,Hispanic/Latino,1
+Ecuadorian,Other Race,Hispanic/Latino,Hispanic/Latino,20
+Ecuadorian,White,Hispanic/Latino,Hispanic/Latino,1
+Guatemalan,Other Race,Hispanic/Latino,Hispanic/Latino,17
+Guatemalan,White,Hispanic/Latino,Hispanic/Latino,2
+Hispanic or Latino/Spanish,Mexican American Indian,Hispanic/Latino,Hispanic/Latino,1
+Hispanic or Latino/Spanish,Other Race,Hispanic/Latino,Hispanic/Latino,718
+Hispanic or Latino/Spanish,Patient Declined,Hispanic/Latino,Hispanic/Latino,223
+Hispanic or Latino/Spanish,White,Hispanic/Latino,Hispanic/Latino,29
+Hispanic or Latino/Spanish,White,White,Hispanic/Latino,4
+Honduran,Other Race,Hispanic/Latino,Hispanic/Latino,5
+"Latin American/Latin, Latino",Other Race,Hispanic/Latino,Hispanic/Latino,27
+"Latin American/Latin, Latino",Patient Declined,Hispanic/Latino,Hispanic/Latino,5
+"Latin American/Latin, Latino",White,Hispanic/Latino,Hispanic/Latino,3
+Mexican,Other Race,Hispanic/Latino,Hispanic/Latino,319
+Mexican,Patient Declined,Hispanic/Latino,Hispanic/Latino,121
+Mexican,White,Hispanic/Latino,Hispanic/Latino,59
+Mexican,White,White,Hispanic/Latino,6
+Mexicano,White,Hispanic/Latino,Hispanic/Latino,1
+Not Hispanic or Latino,African,African American,Black,1
+Not Hispanic or Latino,American Indian or Alaska Native,Native American,Other,1
+Not Hispanic or Latino,Asian,Asian,Asian,44
+Not Hispanic or Latino,Black or African American,African American,Black,25
+Not Hispanic or Latino,Chinese,Asian,Asian,1
+Not Hispanic or Latino,Other Race,Hispanic/Latino,Other,1
+Not Hispanic or Latino,Other Race,Other,Other,32
+Not Hispanic or Latino,Patient Declined,Declined,Unknown,9
+Not Hispanic or Latino,Patient Declined,Hispanic/Latino,Unknown,2
+Not Hispanic or Latino,Polish,White,White,6
+Not Hispanic or Latino,White,White,White,341
+Patient Declined,Asian,Asian,Asian,3
+Patient Declined,Black or African American,African American,Black,3
+Patient Declined,Other Race,Hispanic/Latino,Other,2
+Patient Declined,Other Race,Other,Other,3
+Patient Declined,Patient Declined,Declined,Unknown,15
+Patient Declined,Patient Declined,Hispanic/Latino,Unknown,1
+Patient Declined,Polish,White,White,1
+Patient Declined,White,White,White,6
+Peruvian,Other Race,Hispanic/Latino,Hispanic/Latino,2
+Puerto Rican,White,Hispanic/Latino,Hispanic/Latino,1
+Salvadoran,Other Race,Hispanic/Latino,Hispanic/Latino,5
+Salvadoran,White,Hispanic/Latino,Hispanic/Latino,1
+South American,Other Race,Hispanic/Latino,Hispanic/Latino,5
+South American,Patient Declined,Hispanic/Latino,Hispanic/Latino,4
+Spaniard,Other Race,White,Hispanic/Latino,1
+Uruguayan,White,Hispanic/Latino,Hispanic/Latino,1
+Venezuelan,Other Race,Hispanic/Latino,Hispanic/Latino,1
+Venezuelan,White,Hispanic/Latino,Hispanic/Latino,1

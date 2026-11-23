@@ -1,0 +1,33 @@
+table,variable,description
+kits,patient_id,Patient identifier (grouping factor for random effects)
+kits,kit_seq,Chronological kit number within patient (1 = first kit)
+kits,slot,Source slot (1-8) in raw sheet
+kits,dispense_date,Date kit was dispensed
+kits,dispense_year / dispense_month,Calendar year / month of dispense
+kits,time_yrs,Years from 2022-01-01 to dispense (negative = pre); for secular-trend terms
+kits,period / post,Pre (dispensed before 2022-01-01) vs Post (reminders); post = 1 for Post
+kits,returned,"OUTCOME: 1 = kit returned, 0 = not returned"
+kits,returned_90d,1 = returned within 90 days; NA if returned with unknown date
+kits,return_date / days_to_return,Return date and days from dispense (NA if not returned or date unknown)
+kits,days_followup,Days from dispense to latest return date in file (censoring check)
+kits,result,Negative / Positive / Inadequate / Unknown (NA if not returned)
+kits,age_at_dispense,Age in years at dispense (time-varying)
+kits,age_c10,(age_at_dispense - 55) / 10
+kits,age_in_45_75,1 = age 45-75 at dispense (screening guideline band)
+kits,sex,Female / Male (patientsex column)
+kits,text_consent,Consented to text messages: Yes / No / Unknown
+kits,race_eth,"Hispanic/Latino, White, Black, Asian, Other, Unknown (re-derived)"
+kits,language,"Preferred language: Spanish, Polish, English, Other, Unknown"
+kits,lang_concordant,"1 = preferred language had a reminder version (ENG/SPN/POL), 0 = Other"
+kits,employment / employed,6-level employment status; employed 1/0 (NA if unknown)
+kits,relationship,"Partnered (married/partner), Not partnered, Unknown"
+kits,family_size / family_size_c,Household size (1-8); mean-centred
+kits,n_prior_kits / n_prior_returned / prior_return_rate,Patient's kit history before this kit
+kits,days_since_prev_kit,Days since the patient's previous dispense
+kits,reissued_next_30d,TRUE = not returned and a new kit was dispensed within 30 days
+kits,return_date_fixed,TRUE = return date was manually corrected (see audit/corrections.csv)
+patient_period,n_sent / n_returned / return_rate,Kits dispensed / returned per patient-period (binomial form)
+patient_period,mean_age / age_c10,Mean age at dispense across that period's kits
+patients,periods_observed,Pre only / Post only / Both
+patients,ever_positive,1 = any kit had a positive result
+patients,race_eth_sheet,Original 'Race/ethnicity adjusted' column (for comparison only)

@@ -1,0 +1,371 @@
+---
+title: "FIT Kit Returns: Data Audit & EDA"
+subtitle: "Pre (2019-2021) vs post (2022-2023) text-reminder period"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include = FALSE}
+root <- rprojroot::find_rstudio_root_file()
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5, dpi = 150,
+                      fig.path = paste0(file.path(root, "03_output", "figures"), "/"))   # PNGs kept alongside the HTML
+knitr::opts_knit$set(root.dir = root)
+
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2); library(readr)
+  library(scales); library(patchwork); library(knitr); library(forcats)
+})
+
+# root.dir only applies from the next chunk on, so build paths explicitly here
+kits     <- read_rds(file.path(root, "01_data/clean/kits.rds"))
+patients <- read_rds(file.path(root, "01_data/clean/patients.rds"))
+pp       <- read_rds(file.path(root, "01_data/clean/patient_period.rds"))
+audit    <- read_csv(file.path(root, "03_output/audit/audit_log.csv"), show_col_types = FALSE)
+
+# Palette (reference data-viz palette): post = series-1 blue, pre = neutral gray
+col_post  <- "#2a78d6"
+col_pre   <- "#8a8984"
+col_ink   <- "#0b0b0b"
+col_ink2  <- "#52514e"
+col_grid  <- "#e6e5e1"
+period_cols <- c(Pre = col_pre, Post = col_post)
+
+theme_crc <- function() {
+  theme_minimal(base_size = 11) +
+    theme(text             = element_text(colour = col_ink),
+          axis.text        = element_text(colour = col_ink2),
+          plot.title       = element_text(face = "bold", size = 12),
+          plot.subtitle    = element_text(colour = col_ink2, size = 10),
+          plot.caption     = element_text(colour = col_ink2, size = 8, hjust = 0),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(colour = col_grid, linewidth = 0.3),
+          strip.text       = element_text(face = "bold", hjust = 0),
+          legend.position  = "top", legend.justification = "left",
+          legend.title     = element_blank())
+}
+theme_set(theme_crc())
+
+# Wilson 95% interval for a proportion
+wilson <- function(x, n, z = 1.96) {
+  p <- x / n
+  centre <- (p + z^2 / (2 * n)) / (1 + z^2 / n)
+  half   <- z * sqrt(p * (1 - p) / n + z^2 / (4 * n^2)) / (1 + z^2 / n)
+  tibble(rate = p, lo = centre - half, hi = centre + half)
+}
+rate_tbl <- function(df, ...) {
+  df %>% group_by(...) %>%
+    summarise(n = n(), x = sum(returned), .groups = "drop") %>%
+    bind_cols(wilson(.$x, .$n))
+}
+pct <- label_percent(accuracy = 0.1)
+```
+
+# 1. What the data is
+
+The raw workbook (`01_data/raw/crc_raw.xlsx`) has **one row per patient** (`r nrow(patients)` patients) with up to eight kit "slots" spread across columns, followed by a second block of "2022/23" columns and a set of spreadsheet-computed summaries.
+
+The audit established that **slots 1-8 are the complete kit history (2019-2023)** and the **2022/23 block is a partial copy** of the post-2022 kits from those slots: all but 7 of the `r format(sum(kits$post == 1), big.mark = ",")` post kits appear in the copy, the 6 field disagreements are all explained by the date corrections below, and no kit exists only in the copy. Treating the two blocks as separate kits would double-count roughly 60% of the post-period data. The clean data uses slots 1-8 and uses the copy only to cross-check.
+
+```{r overview}
+overview <- tibble(
+  Measure = c("Patients", "Kits", "Kits: pre (2019-2021)", "Kits: post (2022-2023)",
+              "Patients with kits in both periods", "Patients with pre kits only", "Patients with post kits only",
+              "Dispense date range", "Latest return date in file"),
+  Value = c(nrow(patients), nrow(kits), sum(kits$post == 0), sum(kits$post == 1),
+            sum(patients$periods_observed == "Both"), sum(patients$periods_observed == "Pre only"),
+            sum(patients$periods_observed == "Post only"),
+            paste(format(min(kits$dispense_date)), "to", format(max(kits$dispense_date))),
+            format(max(kits$return_date, na.rm = TRUE)))
+)
+kable(overview)
+```
+
+**Clean tables** (in `01_data/clean/`, `.rds` keeps factor levels, `.csv` for portability):
+
+| Table | Grain | Use |
+|---|---|---|
+| `kits` | one row per kit (`r nrow(kits)`) | **Primary.** Bernoulli GLMM: `returned ~ post + ... + (1 | patient_id)` |
+| `patient_period` | patient × period (`r nrow(pp)`) | Binomial form: `cbind(n_returned, n_sent - n_returned)` |
+| `patients` | one row per patient | Demographics and descriptives |
+
+# 2. Audit findings & cleaning decisions
+
+```{r audit-log}
+audit %>% filter(area != "final") %>%
+  rename(Area = area, Check = check, N = n, `Action taken` = action) %>%
+  kable()
+```
+
+**Return-date corrections** (all listed in `03_output/audit/corrections.csv`):
+
+```{r corrections}
+read_csv("03_output/audit/corrections.csv", show_col_types = FALSE) %>%
+  rename(`Patient` = patient_id, Slot = slot, `Corrected date` = fixed_return_date, Reason = reason) %>%
+  kable()
+```
+
+**Other decisions worth knowing about:**
+
+* **Outcome** = kit returned (Y/N, as recorded). Spelling variants of `Returned` and `Result` were normalised; results map to Negative / Positive / Inadequate (TNP, "no result") / Unknown.
+* **Duplicate kits.** Three patients had the same kit entered twice on one dispense date (one returned record plus one blank "N" record). The blank record was dropped. Two other same-day pairs were both returned with different return dates and results, so they were kept as two kits.
+* **Employment.** The sheet's derived `Employed` columns coded the 203 patients with *missing* employment as unemployed. Here they are a separate `Unknown` level.
+* **Race/ethnicity** was re-derived with one rule: Hispanic ethnicity first, then race. The sheet's `Race/ethnicity adjusted` applied this inconsistently; for example, Mexican + White was coded "White" for 6 patients and "Hispanic" for 59. Seventeen patients changed category. See `race_eth_recode.csv`.
+* **Sex** uses `patientsex`, which is complete. The gender-identity and sex-at-birth columns are sparse and were not used.
+* **Missing categorical values** are kept as an explicit `Unknown` level rather than dropping rows. Whether to model `Unknown` as its own level or drop those patients is left for the modelling step.
+* **Age** is computed at each kit's dispense date, so it varies over time within a patient. `age_c10` = (age − 55)/10.
+* **Not dropped, only flagged:** `r sum(kits$age_in_45_75 == 0)` kits given outside age 45-75 (`age_in_45_75`), 2 returns after more than 365 days, and 9 unreturned kits that were re-issued within 30 days (`reissued_next_30d`).
+* **The spreadsheet's summary columns** (total kits, ever returned, average time to return, etc.) were dropped and rebuilt from the kit records. Ten patients' sheet totals disagreed with the kit records, mostly because of the duplicates above (`sheet_totals_mismatch.csv`).
+
+# 3. Who is in the data
+
+```{r demo-table}
+demo_vars <- c("sex", "race_eth", "language", "text_consent", "employment", "relationship")
+demo <- bind_rows(lapply(demo_vars, function(v) {
+  kits %>% distinct(patient_id, period, level = .data[[v]]) %>%
+    count(period, level) %>% group_by(period) %>% mutate(p = n / sum(n)) %>% ungroup() %>%
+    mutate(variable = v)
+})) %>%
+  mutate(cell = sprintf("%d (%.0f%%)", n, 100 * p)) %>%
+  select(variable, level, period, cell) %>%
+  pivot_wider(names_from = period, values_from = cell, values_fill = "0")
+kable(demo, col.names = c("Variable", "Level", "Patients with pre kits", "Patients with post kits"))
+```
+
+```{r age-fam, fig.height = 3.2}
+p_age <- ggplot(kits, aes(age_at_dispense, fill = period)) +
+  geom_histogram(binwidth = 2, boundary = 45, position = "identity", alpha = 0.55, colour = "white", linewidth = 0.2) +
+  geom_vline(xintercept = c(45, 76), linetype = "dashed", colour = col_ink2, linewidth = 0.3) +
+  scale_fill_manual(values = period_cols) +
+  labs(title = "Age at dispense", subtitle = "Dashed lines: 45-75 screening band", x = "Age (years)", y = "Kits")
+p_fam <- patients %>% count(family_size) %>%
+  ggplot(aes(factor(family_size), n)) + geom_col(fill = col_post, width = 0.7) +
+  labs(title = "Family size", subtitle = "Patients", x = "Household size", y = NULL)
+p_age + p_fam + plot_layout(widths = c(2, 1))
+```
+
+The sample is mostly Hispanic/Latino and Spanish-speaking. Black, Asian, Other and Unknown race/ethnicity together make up about 7% of patients. **Language and race/ethnicity are nearly redundant** (Spanish ↔ Hispanic, Polish ↔ White; section 8), so putting both in one model will make their effects hard to separate. Kits given at ages under 45 are concentrated in 2022-2023, which fits the guideline age dropping from 50 to 45 in 2021.
+
+# 4. The headline: return rate over time
+
+```{r headline}
+hl <- rate_tbl(kits, period)
+kable(hl %>% transmute(Period = period, Kits = n, Returned = x,
+                       `Return rate` = pct(rate), `95% CI` = paste0(pct(lo), " – ", pct(hi))))
+```
+
+```{r trend, fig.height = 4.2}
+q <- kits %>%
+  mutate(qtr = as.Date(cut(dispense_date, "quarter"))) %>%
+  rate_tbl(qtr, period)
+ggplot(q, aes(qtr, rate, colour = period)) +
+  annotate("rect", xmin = as.Date("2020-03-01"), xmax = as.Date("2021-06-30"), ymin = -Inf, ymax = Inf,
+           fill = col_grid, alpha = 0.6) +
+  annotate("text", x = as.Date("2020-11-01"), y = 0.97, label = "COVID-19 disruption", size = 3, colour = col_ink2) +
+  geom_vline(xintercept = as.Date("2022-01-01"), linetype = "dashed", colour = col_ink2, linewidth = 0.4) +
+  annotate("text", x = as.Date("2022-01-20"), y = 0.55, label = "Reminders begin", hjust = 0, size = 3, colour = col_ink2) +
+  geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.6, alpha = 0.6) +
+  geom_line(linewidth = 0.7) +
+  geom_point(aes(size = n)) +
+  scale_colour_manual(values = period_cols) +
+  scale_size_area(max_size = 3.5, guide = "none") +
+  scale_y_continuous(labels = label_percent(), limits = c(0.5, 1)) +
+  labs(title = "Quarterly kit return rate", subtitle = "Points sized by kits dispensed; bars = 95% Wilson CI",
+       x = "Quarter dispensed", y = "Returned")
+```
+
+```{r yearly}
+kable(rate_tbl(kits, dispense_year) %>%
+        transmute(Year = dispense_year, Kits = n, `Return rate` = pct(rate), `95% CI` = paste0(pct(lo), " – ", pct(hi))))
+```
+
+**What this shows for the model:**
+
+* The raw pre→post difference is about `r round(100 * diff(hl$rate))` points. But the pre-period rate drops in 2020 (COVID) and is already recovering in 2021, and 2023 falls back below 2022. A plain `post` indicator will soak up secular trend and COVID recovery along with any reminder effect. Consider calendar-time terms (`time_yrs`, an interrupted-time-series slope change) or a COVID-period indicator.
+* The decline at the end of 2023 is examined in section 7: censoring is not the main explanation.
+
+# 5. Return rate by demographic group, pre vs post
+
+```{r subgroups, fig.height = 8}
+grp_vars <- c(Sex = "sex", `Race/ethnicity` = "race_eth", Language = "language",
+              `Text consent` = "text_consent", Employment = "employment", Relationship = "relationship")
+sg <- bind_rows(lapply(names(grp_vars), function(lbl) {
+  rate_tbl(kits %>% mutate(level = .data[[grp_vars[[lbl]]]]), level, period) %>% mutate(var = lbl)
+})) %>%
+  mutate(var = factor(var, levels = names(grp_vars))) %>%
+  group_by(var, level) %>% filter(min(n) >= 10) %>% ungroup()   # drops language Unknown (3 patients)
+
+# explicit vertical offset: pre slightly below, post slightly above each level's row
+sg <- sg %>%
+  group_by(var) %>% mutate(row = as.numeric(fct_rev(factor(level)))) %>% ungroup() %>%
+  mutate(y = row + if_else(period == "Pre", -0.15, 0.15))
+sg_n <- sg %>% group_by(var, level, row) %>%
+  summarise(lab = paste0(n[period == "Pre"], " / ", n[period == "Post"]), .groups = "drop")
+
+ggplot(sg, aes(rate, y, colour = period)) +
+  geom_segment(aes(x = lo, xend = hi, yend = y), linewidth = 0.6, alpha = 0.45) +
+  geom_point(size = 2.4) +
+  geom_text(data = sg_n, aes(x = 0.30, y = row, label = lab), inherit.aes = FALSE,
+            colour = col_ink2, size = 2.6, hjust = 0) +
+  facet_wrap(~ var, ncol = 2, scales = "free_y") +
+  scale_y_continuous(breaks = function(l) seq_len(floor(max(l))),
+                     labels = NULL, expand = expansion(add = 0.4)) +
+  geom_text(data = sg_n, aes(x = 0.29, y = row, label = level), inherit.aes = FALSE,
+            colour = col_ink, size = 3, hjust = 1) +
+  coord_cartesian(xlim = c(0.30, 1), clip = "off") +
+  scale_colour_manual(values = period_cols) +
+  scale_x_continuous(labels = label_percent(), breaks = seq(0.4, 1, 0.2)) +
+  labs(title = "Kit return rate by group and period",
+       subtitle = "Points = rate, bars = 95% Wilson CI; numbers = kits pre / post",
+       x = "Returned", y = NULL) +
+  theme(plot.margin = margin(5, 10, 5, 115), panel.grid.major.y = element_blank(),
+        panel.spacing.x = unit(120, "pt"))
+```
+
+* Most groups rise from pre to post by similar amounts. Small groups (Black, Asian, Other, Unknown, Other language) have wide intervals and should be partially pooled (random effects) or collapsed rather than given their own fixed slopes.
+* **Text consent = No is an important comparison group.** Those `r sum(patients$text_consent == "No")` patients presumably could not receive reminders. If their return rate also rose after 2022, the rise is secular rather than caused by the reminders. A `post × text_consent` interaction is the closest thing to a difference-in-differences contrast the data supports. Check with the clinic that non-consenting patients really received no messages.
+
+```{r consent-did, fig.height = 3.2}
+cd <- rate_tbl(kits %>% filter(text_consent != "Unknown"), text_consent, period)
+dodge <- position_dodge(width = 0.12)
+ggplot(cd, aes(period, rate, colour = text_consent, group = text_consent)) +
+  geom_line(linewidth = 0.7, position = dodge) +
+  geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.6, alpha = 0.5, position = dodge) +
+  geom_point(size = 2.6, position = dodge) +
+  geom_text(data = cd %>% filter(period == "Post") %>%
+              mutate(label_y = rate + if_else(text_consent == "Yes", 0.03, -0.03)),
+            aes(y = label_y, label = paste0(text_consent, " consent: ", pct(rate), "  (n=", n, ")")),
+            hjust = 0, nudge_x = 0.12, size = 3.2, colour = col_ink, show.legend = FALSE) +
+  scale_colour_manual(values = c(Yes = col_post, No = "#eb6834")) +
+  scale_y_continuous(labels = label_percent(), limits = c(0.5, 1)) +
+  scale_x_discrete(expand = expansion(add = c(0.3, 0.9))) +
+  labs(title = "Text consent as a no-reminder comparison", subtitle = "Kit return rate; bars = 95% CI",
+       x = NULL, y = "Returned") +
+  theme(legend.position = "none")
+kable(cd %>% transmute(`Text consent` = text_consent, Period = period, Kits = n, `Return rate` = pct(rate),
+                       `95% CI` = paste0(pct(lo), " – ", pct(hi))))
+```
+
+# 6. Within-patient structure (why a mixed model)
+
+```{r clustering, fig.height = 3.4}
+kpp <- patients %>% count(n_kits) %>%
+  ggplot(aes(factor(n_kits), n)) + geom_col(fill = col_post, width = 0.7) +
+  labs(title = "Kits per patient", x = "Kits", y = "Patients")
+prate <- patients %>% filter(n_kits >= 2) %>% mutate(r = n_returned / n_kits) %>%
+  ggplot(aes(r)) + geom_histogram(binwidth = 0.1, boundary = 0, fill = col_post, colour = "white") +
+  scale_x_continuous(labels = label_percent()) +
+  labs(title = "Patient return rate", subtitle = "Patients with ≥ 2 kits", x = "Share of kits returned", y = "Patients")
+kpp + prate
+```
+
+```{r icc}
+# Simple one-way ANOVA ICC on the binary outcome (descriptive, not a model)
+multi <- kits %>% group_by(patient_id) %>% filter(n() >= 2) %>% ungroup()
+a <- anova(lm(returned ~ factor(patient_id), data = multi))
+k0 <- with(multi %>% count(patient_id), (sum(n) - sum(n^2) / sum(n)) / (n_distinct(patient_id) - 1))
+icc <- (a$`Mean Sq`[1] - a$`Mean Sq`[2]) / (a$`Mean Sq`[1] + (k0 - 1) * a$`Mean Sq`[2])
+
+hist_tbl <- kits %>% filter(n_prior_kits > 0) %>%
+  mutate(history = cut(prior_return_rate, c(-Inf, 0, 0.99, Inf), labels = c("None returned", "Some returned", "All returned"))) %>%
+  rate_tbl(history)
+```
+
+* Most patients with several kits return all of them or none. The descriptive ICC of the binary outcome among patients with ≥ 2 kits is about **`r round(icc, 2)`**. Kits from the same patient are not independent, so a patient random intercept `(1 | patient_id)` is necessary.
+* Prior behaviour strongly predicts the next kit: return rate is `r pct(hist_tbl$rate[hist_tbl$history == "All returned"])` when every earlier kit was returned and `r pct(hist_tbl$rate[hist_tbl$history == "None returned"])` when none were. The random intercept already captures this. **Do not also add `prior_return_rate` as a covariate** next to the random intercept: it is a lagged outcome and would partly absorb the reminder effect, because post kits are later in each patient's sequence.
+* Only `r sum(patients$periods_observed == "Both")` patients contribute kits in **both** periods. For the other `r sum(patients$periods_observed != "Both")`, the pre/post contrast is between different people, so patient covariates do more of the work there.
+
+```{r paired, fig.height = 3.4}
+paired <- pp %>% filter(periods_observed == "Both") %>%
+  select(patient_id, period, return_rate) %>%
+  pivot_wider(names_from = period, values_from = return_rate) %>%
+  mutate(change = case_when(Post > Pre ~ "Improved", Post < Pre ~ "Declined", TRUE ~ "No change")) %>%
+  count(change) %>% mutate(p = n / sum(n), change = factor(change, c("Declined", "No change", "Improved")))
+ggplot(paired, aes(p, change)) + geom_col(fill = col_post, width = 0.6) +
+  geom_text(aes(label = paste0(pct(p), "  (n=", n, ")")), hjust = -0.1, size = 3.2, colour = col_ink) +
+  scale_x_continuous(labels = label_percent(), limits = c(0, 1)) +
+  labs(title = "Within-patient change, pre → post", subtitle = "Patients with kits in both periods (n = 876)",
+       x = "Share of patients", y = NULL)
+```
+
+# 7. Time to return & censoring
+
+```{r ttr, fig.height = 3.4}
+ttr <- kits %>% filter(returned == 1, !is.na(days_to_return))
+ggplot(ttr, aes(days_to_return, colour = period)) +
+  stat_ecdf(linewidth = 0.8) +
+  geom_vline(xintercept = 90, linetype = "dashed", colour = col_ink2, linewidth = 0.3) +
+  scale_colour_manual(values = period_cols) +
+  scale_x_continuous(limits = c(0, 200)) +
+  scale_y_continuous(labels = label_percent()) +
+  labs(title = "Days from dispense to return (returned kits)", subtitle = "Cumulative share; dashed line = 90 days",
+       x = "Days", y = "Share returned by day")
+kable(ttr %>% group_by(Period = period) %>%
+        summarise(`Returned kits` = n(), `Median days` = median(days_to_return),
+                  `75th pct` = quantile(days_to_return, 0.75), `Within 90 d` = pct(mean(days_to_return <= 90))))
+```
+
+```{r censoring, fig.height = 3.2}
+tail_m <- kits %>% filter(dispense_date >= as.Date("2023-01-01")) %>%
+  mutate(month = as.Date(cut(dispense_date, "month"))) %>% rate_tbl(month)
+ggplot(tail_m, aes(month, rate)) +
+  geom_linerange(aes(ymin = lo, ymax = hi), colour = col_post, alpha = 0.5) +
+  geom_line(colour = col_post, linewidth = 0.7) + geom_point(colour = col_post, size = 2) +
+  scale_y_continuous(labels = label_percent(), limits = c(0.4, 1)) +
+  labs(title = "2023 return rate by dispense month", subtitle = "Bars = 95% CI", x = NULL, y = "Returned")
+```
+
+* Returns are fast: the median is about two weeks and about 95% arrive within 90 days. Post-period returns are **not** faster; if anything they are a little slower (median 14 vs 12 days). Any reminder effect looks like *more* returns, not *quicker* ones, possibly because reminders bring in late returners who would otherwise never have returned.
+```{r q4}
+q4 <- kits %>% mutate(q = if_else(dispense_month >= 10, "Q4 (Oct-Dec)", "Q1-Q3")) %>%
+  rate_tbl(dispense_year, q) %>%
+  transmute(dispense_year, q, cell = sprintf("%s (n=%d)", pct(rate), n)) %>%
+  pivot_wider(names_from = q, values_from = cell)
+kable(q4, col.names = c("Year", "Q1-Q3", "Q4 (Oct-Dec)"), caption = "Return rate by dispense quarter, by year")
+```
+
+* The latest return in the file is 2024-06-05, so even December 2023 kits had more than 5 months of follow-up. That captures almost all eventual returns, so **right-censoring cannot explain the drop to about 65% in late 2023**.
+* **Q4 is low in 3 of 5 years** (2019, 2020, 2023), but not in 2021 or 2022, so seasonality explains the late-2023 dip only partly at best. Adding a Q4 or month-of-year term to the model, plus a sensitivity analysis excluding Q4 2023, is reasonable. It is still worth asking the clinic whether anything changed operationally in late 2023.
+* `returned_90d` is provided as an alternative outcome with equal follow-up for every kit.
+
+# 8. Covariate overlap
+
+```{r cramer, fig.height = 4.2, fig.width = 6}
+cramers_v <- function(x, y) {
+  t <- table(x, y); chi <- suppressWarnings(chisq.test(t, correct = FALSE)$statistic)
+  as.numeric(sqrt(chi / (sum(t) * (min(dim(t)) - 1))))
+}
+cv_vars <- c(sex = "Sex", race_eth = "Race/eth", language = "Language", text_consent = "Text consent",
+             employment = "Employment", relationship = "Relationship")
+cv <- expand_grid(a = names(cv_vars), b = names(cv_vars)) %>%
+  rowwise() %>% mutate(v = cramers_v(patients[[a]], patients[[b]])) %>% ungroup() %>%
+  mutate(a = factor(cv_vars[a], levels = cv_vars), b = factor(cv_vars[b], levels = rev(cv_vars)))
+ggplot(cv, aes(a, b, fill = v)) +
+  geom_tile(colour = "white", linewidth = 2) +
+  geom_text(aes(label = sprintf("%.2f", v), colour = v > 0.5), size = 3.2) +
+  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = col_ink), guide = "none") +
+  scale_fill_gradient(low = "#cde2fb", high = "#104281", limits = c(0, 1), name = "Cramér's V") +
+  labs(title = "Association between patient covariates", x = NULL, y = NULL) +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "right")
+kable(table(patients$language, patients$race_eth), caption = "Language × race/ethnicity (patients)")
+```
+
+Language and race/ethnicity are strongly associated (Cramér's V ≈ `r sprintf("%.2f", cv$v[cv$a == "Race/eth" & cv$b == "Language"])`). Pick one as the main grouping, or use the `lang_concordant` contrast (reminder available in the patient's language vs. "Other" language) for the language question. Sex and employment are moderately associated (V ≈ `r sprintf("%.2f", cv$v[cv$a == "Sex" & cv$b == "Employment"])`), which is workable but worth checking for unstable estimates. All other pairs are weak (V < 0.2).
+
+# 9. Notes for the modelling step
+
+1. **Use `kits.rds` as the model table.** Model `returned` as Bernoulli with `(1 | patient_id)`. Use `patient_period.rds` only if you want the binomial form; it averages age within each period.
+2. **Separate the reminder effect from time.** Add calendar-time terms (`time_yrs`, possibly a slope change at 2022, or a COVID-period indicator) and a seasonal term (Q4 / `dispense_month`). Use `text_consent` as a no-reminder comparison through a `post × text_consent` interaction.
+3. **Sparse groups:** pool race/ethnicity and language groups with random effects or collapse them. Don't give `Unknown` levels their own random slopes.
+4. **Covariate choices:** use `age_c10` (time-varying), `sex`, `family_size_c`, `relationship`, and `employment` (six levels) or `employed`. Avoid having `language` and `race_eth` both as fixed effects.
+5. **Sensitivity analyses:** restrict to `age_in_45_75 == 1`; exclude Q4 2023; use `returned_90d` as the outcome; restrict to patients with kits in both periods.
+6. **Selection caveat:** every patient has an order chart date between 2021-11 and 2023-11, so the cohort was defined by being active during the reminder era. Pre-period kits are therefore only from patients who stayed with the clinic. Data cleaning cannot fix this, but it bounds how far the pre/post comparison generalises.
+
+```{r session, echo = FALSE}
+cat("Rendered with R", R.version$major, ".", R.version$minor, sep = "")
+```
